@@ -10,14 +10,26 @@ st.set_page_config(
 )
 
 # ============================================================
-# LOAD MODEL
+# LOAD MODELS
 # ============================================================
 
 @st.cache_resource
 def load_model_bundle():
     return joblib.load("cannes_model_bundle.pkl")
 
+
+@st.cache_resource
+def load_embedding_model():
+    try:
+        from sentence_transformers import SentenceTransformer
+        return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    except Exception as e:
+        st.warning(f"No se pudo cargar el modelo semántico. Se usarán reglas simples. Detalle: {e}")
+        return None
+
+
 bundle = load_model_bundle()
+
 rf_regressor_final = bundle["rf_regressor_final"]
 rf_classifier_final = bundle["rf_classifier_final"]
 features = bundle["features"]
@@ -26,18 +38,15 @@ categorical_features = bundle["categorical_features"]
 importance_df = bundle.get("importance_df", pd.DataFrame())
 training_categories = bundle.get("training_categories", {})
 
+embedding_model = load_embedding_model()
+
 
 # ============================================================
-# BASIC HELPERS
+# HELPERS
 # ============================================================
 
 def clamp(value, low, high):
     return max(low, min(high, value))
-
-
-def contains_any(text, words):
-    text = str(text).lower()
-    return any(w.lower() in text for w in words)
 
 
 def count_keywords(text, words):
@@ -65,16 +74,99 @@ def fit_status_from_score(score):
     return "baja afinidad"
 
 
+def has_enough_creative_information(project_name, description):
+    text = f"{project_name} {description}".lower().strip()
+    words = [w for w in text.split() if len(w) > 2]
+
+    creative_signal_words = [
+        "campaña", "activación", "instalación", "experiencia", "evento",
+        "documental", "historia", "personas", "comunidad", "social",
+        "cultura", "viral", "medio", "medios", "pr", "mundo", "récord",
+        "record", "reto", "challenge", "acción", "intervención",
+        "metro", "aeropuerto", "plaza", "ciudad", "mundial", "méxico",
+        "tecnología", "app", "sensor", "ai", "inteligencia", "datos",
+        "impacto", "sustentabilidad", "sostenibilidad", "salud",
+        "educación", "derechos", "marca", "público", "audiencia"
+    ]
+
+    signal_count = sum(1 for w in creative_signal_words if w in text)
+
+    if len(words) < 12 or signal_count == 0:
+        return False
+
+    return True
+
+
 # ============================================================
-# AUTO-ESTIMATION RULES
+# OPEN-SOURCE AI PROTOTYPES
 # ============================================================
+
+IDEA_PROTOTYPES = {
+    "emotional storytelling": (
+        "A campaign based on human truth, emotion, personal stories, family, memory, "
+        "hope, identity, dreams, pride or a moving narrative."
+    ),
+    "public relations stunt": (
+        "A public relations stunt, activation or public intervention designed to generate "
+        "earned media, public conversation, virality or cultural attention."
+    ),
+    "social impact": (
+        "A campaign with social impact addressing community, sustainability, education, "
+        "health, inclusion, equality, rights, climate or social change."
+    ),
+    "activism": (
+        "An activism campaign focused on protest, justice, rights, discrimination, gender "
+        "equality, climate action, violence, petitions or public movements."
+    ),
+    "technology-driven idea": (
+        "A technology-driven idea using artificial intelligence, data, algorithms, sensors, "
+        "automation, robotics, augmented reality, virtual reality or software."
+    ),
+    "experiential idea": (
+        "An experiential campaign with an installation, live experience, immersive activation, "
+        "event, pop-up, exhibition or interactive public experience."
+    ),
+    "utility idea": (
+        "A useful tool, service, guide, platform, kit, map or practical solution that helps "
+        "people solve a problem."
+    ),
+    "product innovation": (
+        "A product innovation, prototype, new material, packaging, device, limited edition "
+        "product or redesigned object."
+    ),
+    "documentary": (
+        "A documentary, real story, testimony, interview, portrait, docuseries or case film "
+        "centered on real people or true events."
+    ),
+    "humor": (
+        "A funny campaign based on comedy, parody, jokes, satire, memes, pranks or entertaining humor."
+    ),
+    "absurdity": (
+        "An absurd, bizarre, surreal, weird, unexpected or impossible idea that creates attention."
+    ),
+    "innovation": (
+        "A breakthrough innovation or new way of doing something, first-ever idea, reinvention, "
+        "transformation or pioneering creative solution."
+    )
+}
+
+SENTIMENT_PROTOTYPES = {
+    "funny": "The idea feels funny, comedic, playful, humorous, satirical or entertaining.",
+    "hopeful": "The idea feels hopeful, optimistic, positive, future-facing and uplifting.",
+    "inspirational": "The idea feels inspirational, empowering, heroic, brave or celebratory.",
+    "sad": "The idea feels sad, emotional, painful, tragic, about loss, grief, poverty or suffering.",
+    "tense": "The idea feels tense, urgent, confrontational, risky, conflict-driven or protest-like.",
+    "shocking": "The idea feels shocking, surprising, provocative, unexpected, taboo or revealing.",
+    "nostalgic": "The idea feels nostalgic, tied to memory, childhood, heritage, home, tradition or legacy."
+}
+
 
 IDEA_KEYWORDS = {
     "public relations stunt": [
-        "stunt", "activation", "activación", "intervención", "public intervention",
-        "earned media", "earned conversation", "guerrilla", "takeover", "challenge",
-        "reto", "récord", "record", "world's biggest", "biggest", "largest",
-        "más grande", "evento público", "protest", "demonstration", "movimiento"
+        "stunt", "activation", "activación", "intervención", "earned media",
+        "guerrilla", "takeover", "challenge", "reto", "récord", "record",
+        "world's biggest", "biggest", "largest", "más grande", "evento público",
+        "protest", "demonstration", "movimiento", "ola", "metro", "aeropuerto"
     ],
     "experiential idea": [
         "experience", "experiential", "experiencia", "installation", "instalación",
@@ -96,9 +188,10 @@ IDEA_KEYWORDS = {
     ],
     "technology-driven idea": [
         "ai", "artificial intelligence", "inteligencia artificial", "machine learning",
-        "algorithm", "algoritmo", "sensor", "blockchain", "augmented reality", "realidad aumentada",
-        "virtual reality", "realidad virtual", "api", "iot", "automation", "automatización",
-        "robot", "facial recognition", "voice recognition", "computer vision", "data model"
+        "algorithm", "algoritmo", "sensor", "blockchain", "augmented reality",
+        "realidad aumentada", "virtual reality", "realidad virtual", "api", "iot",
+        "automation", "automatización", "robot", "facial recognition",
+        "voice recognition", "computer vision", "data model"
     ],
     "utility idea": [
         "tool", "herramienta", "solution", "solución", "service", "servicio", "help",
@@ -107,12 +200,13 @@ IDEA_KEYWORDS = {
     ],
     "product innovation": [
         "product", "producto", "prototype", "prototipo", "device", "dispositivo",
-        "packaging", "empaque", "material", "bottle", "botella", "wearable", "new product",
-        "limited edition", "edición limitada", "designed", "diseñado"
+        "packaging", "empaque", "material", "bottle", "botella", "wearable",
+        "new product", "limited edition", "edición limitada", "designed", "diseñado"
     ],
     "documentary": [
-        "documentary", "documental", "docuseries", "film series", "real story", "historia real",
-        "true story", "interview", "entrevista", "testimony", "testimonio", "portrait", "retrato"
+        "documentary", "documental", "docuseries", "film series", "real story",
+        "historia real", "true story", "interview", "entrevista", "testimony",
+        "testimonio", "portrait", "retrato"
     ],
     "humor": [
         "funny", "humor", "laugh", "risa", "joke", "broma", "comedy", "comedia",
@@ -130,150 +224,163 @@ IDEA_KEYWORDS = {
     "emotional storytelling": [
         "story", "historia", "life", "vida", "family", "familia", "mother", "madre",
         "father", "padre", "home", "hogar", "dream", "sueño", "love", "amor",
-        "memory", "memoria", "human", "humano", "journey", "viaje", "tribute", "homenaje"
+        "memory", "memoria", "human", "humano", "journey", "viaje", "tribute", "homenaje",
+        "orgullo", "aspiración", "país", "méxico"
     ]
 }
 
 SENTIMENT_KEYWORDS = {
     "funny": ["funny", "humor", "laugh", "risa", "joke", "broma", "comedy", "parody", "meme", "satire"],
-    "hopeful": ["hope", "esperanza", "future", "futuro", "change", "cambio", "better", "mejor", "progress", "progreso", "support", "apoyo"],
-    "inspirational": ["inspire", "inspirar", "hero", "héroe", "courage", "valor", "brave", "valiente", "empower", "empoderar", "celebrate", "celebrar"],
+    "hopeful": ["hope", "esperanza", "future", "futuro", "change", "cambio", "better", "mejor", "progress", "progreso", "support", "apoyo", "aspiración", "mundial"],
+    "inspirational": ["inspire", "inspirar", "hero", "héroe", "courage", "valor", "brave", "valiente", "empower", "empoderar", "celebrate", "celebrar", "orgullo"],
     "sad": ["sad", "triste", "lost", "perdido", "death", "muerte", "grief", "duelo", "abuse", "abuso", "hunger", "hambre", "poverty", "pobreza", "illness", "enfermedad"],
     "tense": ["anger", "enojo", "fight", "lucha", "war", "guerra", "conflict", "conflicto", "crisis", "protest", "protesta", "threat", "amenaza", "risk", "riesgo"],
     "shocking": ["shock", "impactante", "danger", "peligro", "unexpected", "inesperado", "surprise", "sorpresa", "taboo", "scandal", "escándalo", "hidden", "oculto", "exposed"],
     "nostalgic": ["memory", "memoria", "remember", "recordar", "childhood", "infancia", "home", "hogar", "past", "pasado", "heritage", "tradición", "legacy", "legado"]
 }
 
+
 CATEGORY_PROFILES = {
-    "film": {
-        "emotional": 0.25, "culture": 0.15, "viral": 0.10, "simplicity": 0.20,
-        "execution": 0.20, "tech": 0.03, "social": 0.07
-    },
-    "film craft": {
-        "emotional": 0.15, "culture": 0.10, "viral": 0.05, "simplicity": 0.10,
-        "execution": 0.45, "tech": 0.05, "social": 0.10
-    },
-    "public relations": {
-        "emotional": 0.08, "culture": 0.22, "viral": 0.35, "simplicity": 0.10,
-        "execution": 0.08, "tech": 0.04, "social": 0.13
-    },
-    "pr": {
-        "emotional": 0.08, "culture": 0.22, "viral": 0.35, "simplicity": 0.10,
-        "execution": 0.08, "tech": 0.04, "social": 0.13
-    },
-    "outdoor": {
-        "emotional": 0.08, "culture": 0.18, "viral": 0.28, "simplicity": 0.22,
-        "execution": 0.14, "tech": 0.03, "social": 0.07
-    },
-    "innovation": {
-        "emotional": 0.05, "culture": 0.12, "viral": 0.08, "simplicity": 0.10,
-        "execution": 0.18, "tech": 0.32, "social": 0.15
-    },
-    "titanium": {
-        "emotional": 0.15, "culture": 0.25, "viral": 0.20, "simplicity": 0.10,
-        "execution": 0.10, "tech": 0.08, "social": 0.12
-    },
-    "brand experience": {
-        "emotional": 0.10, "culture": 0.15, "viral": 0.22, "simplicity": 0.10,
-        "execution": 0.25, "tech": 0.08, "social": 0.10
-    },
-    "direct": {
-        "emotional": 0.08, "culture": 0.14, "viral": 0.15, "simplicity": 0.20,
-        "execution": 0.10, "tech": 0.08, "social": 0.25
-    },
-    "design": {
-        "emotional": 0.08, "culture": 0.12, "viral": 0.08, "simplicity": 0.20,
-        "execution": 0.32, "tech": 0.08, "social": 0.12
-    },
-    "media": {
-        "emotional": 0.08, "culture": 0.18, "viral": 0.30, "simplicity": 0.12,
-        "execution": 0.10, "tech": 0.10, "social": 0.12
-    },
-    "default": {
-        "emotional": 0.14, "culture": 0.18, "viral": 0.18, "simplicity": 0.15,
-        "execution": 0.15, "tech": 0.08, "social": 0.12
-    }
+    "film": {"emotional": 0.25, "culture": 0.15, "viral": 0.10, "simplicity": 0.20, "execution": 0.20, "tech": 0.03, "social": 0.07},
+    "film craft": {"emotional": 0.15, "culture": 0.10, "viral": 0.05, "simplicity": 0.10, "execution": 0.45, "tech": 0.05, "social": 0.10},
+    "public relations": {"emotional": 0.08, "culture": 0.22, "viral": 0.35, "simplicity": 0.10, "execution": 0.08, "tech": 0.04, "social": 0.13},
+    "pr": {"emotional": 0.08, "culture": 0.22, "viral": 0.35, "simplicity": 0.10, "execution": 0.08, "tech": 0.04, "social": 0.13},
+    "outdoor": {"emotional": 0.08, "culture": 0.18, "viral": 0.28, "simplicity": 0.22, "execution": 0.14, "tech": 0.03, "social": 0.07},
+    "innovation": {"emotional": 0.05, "culture": 0.12, "viral": 0.08, "simplicity": 0.10, "execution": 0.18, "tech": 0.32, "social": 0.15},
+    "titanium": {"emotional": 0.15, "culture": 0.25, "viral": 0.20, "simplicity": 0.10, "execution": 0.10, "tech": 0.08, "social": 0.12},
+    "brand experience": {"emotional": 0.10, "culture": 0.15, "viral": 0.22, "simplicity": 0.10, "execution": 0.25, "tech": 0.08, "social": 0.10},
+    "direct": {"emotional": 0.08, "culture": 0.14, "viral": 0.15, "simplicity": 0.20, "execution": 0.10, "tech": 0.08, "social": 0.25},
+    "design": {"emotional": 0.08, "culture": 0.12, "viral": 0.08, "simplicity": 0.20, "execution": 0.32, "tech": 0.08, "social": 0.12},
+    "media": {"emotional": 0.08, "culture": 0.18, "viral": 0.30, "simplicity": 0.12, "execution": 0.10, "tech": 0.10, "social": 0.12},
+    "default": {"emotional": 0.14, "culture": 0.18, "viral": 0.18, "simplicity": 0.15, "execution": 0.15, "tech": 0.08, "social": 0.12},
 }
 
 
-def get_category_profile(category):
-    c = str(category).lower()
-    for key, profile in CATEGORY_PROFILES.items():
-        if key != "default" and key in c:
-            return profile
-    return CATEGORY_PROFILES["default"]
+# ============================================================
+# SEMANTIC + RULE-BASED AUTOESTIMATION
+# ============================================================
+
+def semantic_best_label(text, prototypes, fallback_label):
+    if embedding_model is None:
+        return fallback_label, 0.0
+
+    try:
+        from sentence_transformers import util
+
+        labels = list(prototypes.keys())
+        prototype_texts = [prototypes[label] for label in labels]
+
+        embeddings = embedding_model.encode([text] + prototype_texts, convert_to_tensor=True)
+        query_embedding = embeddings[0]
+        prototype_embeddings = embeddings[1:]
+
+        similarities = util.cos_sim(query_embedding, prototype_embeddings)[0].cpu().numpy()
+        best_idx = int(np.argmax(similarities))
+
+        best_label = labels[best_idx]
+        best_score = float(similarities[best_idx])
+
+        return best_label, best_score
+
+    except Exception:
+        return fallback_label, 0.0
 
 
-def auto_estimate_idea_type(text, category):
+def keyword_idea_type(text, category):
     full_text = f"{text} {category}".lower()
     scores = {idea: count_keywords(full_text, kws) for idea, kws in IDEA_KEYWORDS.items()}
 
     c = str(category).lower()
+
     if "film" in c:
         scores["emotional storytelling"] += 2
         scores["documentary"] += 1
+
     if "public relations" in c or c.strip() == "pr":
         scores["public relations stunt"] += 2
+
     if "outdoor" in c:
         scores["public relations stunt"] += 1
         scores["experiential idea"] += 1
+
     if "experience" in c or "activation" in c:
         scores["experiential idea"] += 2
+
     if "innovation" in c:
         scores["innovation"] += 2
         scores["technology-driven idea"] += 1
+
     if "design" in c:
         scores["product innovation"] += 1
+
     if "health" in c or "sustainable" in c:
         scores["social impact"] += 2
 
-    strong_tech = count_keywords(full_text, IDEA_KEYWORDS["technology-driven idea"])
-    if strong_tech == 0:
+    if count_keywords(full_text, IDEA_KEYWORDS["technology-driven idea"]) == 0:
         scores["technology-driven idea"] = 0
 
     priority = [
-        "activism", "social impact", "public relations stunt", "experiential idea",
-        "utility idea", "product innovation", "documentary", "humor", "absurdity",
-        "emotional storytelling", "technology-driven idea", "innovation"
+        "activism",
+        "social impact",
+        "public relations stunt",
+        "experiential idea",
+        "utility idea",
+        "product innovation",
+        "documentary",
+        "humor",
+        "absurdity",
+        "emotional storytelling",
+        "technology-driven idea",
+        "innovation"
     ]
 
     max_score = max(scores.values())
+
     if max_score == 0:
         return "emotional storytelling"
 
     candidates = [k for k, v in scores.items() if v == max_score]
+
     for p in priority:
         if p in candidates:
             return p
+
     return candidates[0]
 
 
-def auto_estimate_sentiment(text, idea_type):
+def keyword_sentiment(text, idea_type):
     full_text = str(text).lower()
     scores = {sent: count_keywords(full_text, kws) for sent, kws in SENTIMENT_KEYWORDS.items()}
 
     if idea_type == "humor":
         scores["funny"] += 3
+
     if idea_type == "absurdity":
         scores["funny"] += 1
         scores["shocking"] += 2
+
     if idea_type == "activism":
         scores["tense"] += 2
         scores["hopeful"] += 1
+
     if idea_type == "social impact":
         scores["hopeful"] += 2
         scores["inspirational"] += 1
+
     if idea_type == "emotional storytelling":
         scores["nostalgic"] += 1
         scores["inspirational"] += 1
+
     if idea_type == "documentary":
         scores["sad"] += 1
         scores["inspirational"] += 1
+
     if idea_type == "public relations stunt":
         scores["shocking"] += 1
 
     priority = ["shocking", "funny", "tense", "hopeful", "nostalgic", "sad", "inspirational"]
     max_score = max(scores.values())
+
     if max_score == 0:
         if idea_type == "public relations stunt":
             return "shocking"
@@ -286,23 +393,77 @@ def auto_estimate_sentiment(text, idea_type):
         return "hopeful"
 
     candidates = [k for k, v in scores.items() if v == max_score]
+
     for p in priority:
         if p in candidates:
             return p
+
     return candidates[0]
 
 
-def auto_estimate_scores(project_name, description, category, idea_type, sentiment):
+def get_category_profile(category):
+    c = str(category).lower()
+
+    for key, profile in CATEGORY_PROFILES.items():
+        if key != "default" and key in c:
+            return profile
+
+    return CATEGORY_PROFILES["default"]
+
+
+def estimate_scores(project_name, description, category, idea_type, sentiment):
     text = f"{project_name} {description} {category} {idea_type} {sentiment}".lower()
 
     social_words = IDEA_KEYWORDS["social impact"] + IDEA_KEYWORDS["activism"]
-    viral_words = IDEA_KEYWORDS["public relations stunt"] + ["viral", "share", "conversation", "conversación", "famoso"]
+    viral_words = IDEA_KEYWORDS["public relations stunt"] + [
+        "viral",
+        "share",
+        "conversation",
+        "conversación",
+        "famoso",
+        "noticia",
+        "medios",
+        "prensa"
+    ]
     tech_words = IDEA_KEYWORDS["technology-driven idea"]
     complexity_words = [
-        "installation", "instalación", "event", "evento", "live", "en vivo", "platform", "plataforma",
-        "app", "technology", "tecnología", "film", "documentary", "documental", "production", "producción"
+        "installation",
+        "instalación",
+        "event",
+        "evento",
+        "live",
+        "en vivo",
+        "platform",
+        "plataforma",
+        "app",
+        "technology",
+        "tecnología",
+        "film",
+        "documentary",
+        "documental",
+        "production",
+        "producción",
+        "metro",
+        "aeropuerto",
+        "aeropuertos",
+        "plazas",
+        "ciudad",
+        "nacional"
     ]
-    simplicity_words = ["simple", "simplicity", "clarity", "claro", "directo", "fácil", "easy", "one idea", "memorable"]
+    simplicity_words = [
+        "simple",
+        "simplicity",
+        "clarity",
+        "claro",
+        "directo",
+        "fácil",
+        "easy",
+        "one idea",
+        "memorable",
+        "ola",
+        "unidos",
+        "unir"
+    ]
 
     social_count = count_keywords(text, social_words)
     viral_count = count_keywords(text, viral_words)
@@ -310,44 +471,61 @@ def auto_estimate_scores(project_name, description, category, idea_type, sentime
     complexity_count = count_keywords(text, complexity_words)
     simplicity_count = count_keywords(text, simplicity_words)
 
-    cultural_relevance = 5 + min(4, social_count * 1.2)
-    viral_potential = 5 + min(4, viral_count * 1.2)
-    simplicity_of_insight = 7 + min(2, simplicity_count * 0.7)
-    execution_complexity = 5 + min(4, complexity_count * 0.8)
+    cultural_relevance = 4.5 + min(4.5, social_count * 1.0)
+    viral_potential = 4.5 + min(4.5, viral_count * 1.0)
+    simplicity_of_insight = 6.0 + min(3.0, simplicity_count * 0.8)
+    execution_complexity = 4.0 + min(5.0, complexity_count * 0.7)
 
     tech_component_ai = 1 if tech_count > 0 or idea_type == "technology-driven idea" else 0
     social_impact_ai = 1 if social_count > 0 or idea_type in ["social impact", "activism"] else 0
 
     if idea_type == "public relations stunt":
         viral_potential += 1.5
-        execution_complexity += 0.5
+        execution_complexity += 0.8
+
     if idea_type == "experiential idea":
         viral_potential += 0.8
         execution_complexity += 1.2
+
     if idea_type == "emotional storytelling":
         cultural_relevance += 0.8
-        simplicity_of_insight += 0.5
+        simplicity_of_insight += 0.6
+
     if idea_type == "technology-driven idea":
         execution_complexity += 2
+
     if idea_type == "utility idea":
         simplicity_of_insight += 0.5
+
     if idea_type == "product innovation":
         execution_complexity += 1
+
+    if idea_type in ["social impact", "activism"]:
+        cultural_relevance += 1.5
+
     if sentiment in ["shocking", "tense", "funny"]:
         viral_potential += 1
+
     if sentiment in ["hopeful", "nostalgic", "sad", "inspirational"]:
         cultural_relevance += 0.5
 
     c = str(category).lower()
+
     if "public relations" in c or c.strip() == "pr":
         viral_potential += 1
+
     if "film" in c:
         simplicity_of_insight += 0.5
+
     if "innovation" in c:
         execution_complexity += 1
+
     if "outdoor" in c:
         viral_potential += 0.8
         simplicity_of_insight += 0.5
+
+    if "media" in c:
+        viral_potential += 0.5
 
     return {
         "cultural_relevance": round(clamp(cultural_relevance, 1, 10), 1),
@@ -359,14 +537,17 @@ def auto_estimate_scores(project_name, description, category, idea_type, sentime
     }
 
 
-def auto_estimate_jury_fit(category, idea_type, sentiment, scores):
+def estimate_jury_fit(category, idea_type, sentiment, scores):
     profile = get_category_profile(category)
 
     emotional_signal = 0.4
+
     if idea_type == "emotional storytelling":
         emotional_signal += 0.35
+
     if sentiment in ["hopeful", "nostalgic", "sad", "inspirational"]:
         emotional_signal += 0.25
+
     emotional_signal = clamp(emotional_signal, 0, 1)
 
     culture = scores["cultural_relevance"] / 10
@@ -378,10 +559,13 @@ def auto_estimate_jury_fit(category, idea_type, sentiment, scores):
 
     if idea_type == "public relations stunt":
         viral = clamp(viral + 0.20, 0, 1)
+
     if idea_type in ["utility idea", "product innovation"]:
         execution = clamp(execution + 0.10, 0, 1)
+
     if idea_type in ["social impact", "activism"]:
         social = 1
+
     if idea_type == "technology-driven idea":
         tech = 1
 
@@ -399,12 +583,57 @@ def auto_estimate_jury_fit(category, idea_type, sentiment, scores):
 
 
 def auto_estimate_all(project_name, description, category):
-    text = f"{project_name} {description}"
-    idea_type = auto_estimate_idea_type(text, category)
-    sentiment = auto_estimate_sentiment(text, idea_type)
-    scores = auto_estimate_scores(project_name, description, category, idea_type, sentiment)
-    jury_fit_score = auto_estimate_jury_fit(category, idea_type, sentiment, scores)
+    if not has_enough_creative_information(project_name, description):
+        return {
+            "idea_type_ai": "emotional storytelling",
+            "sentiment_ai": "hopeful",
+            "cultural_relevance": 2.0,
+            "viral_potential": 2.0,
+            "simplicity_of_insight": 3.0,
+            "execution_complexity": 2.0,
+            "tech_component_ai": 0,
+            "social_impact_ai": 0,
+            "jury_fit_score": 25.0,
+            "jury_fit_status": "baja afinidad",
+            "classification_confidence": 0.20,
+            "semantic_idea_confidence": 0.0,
+            "semantic_sentiment_confidence": 0.0
+        }
+
+    text = f"{project_name}. {description}. Category: {category}"
+
+    keyword_idea = keyword_idea_type(text, category)
+    semantic_idea, semantic_idea_conf = semantic_best_label(text, IDEA_PROTOTYPES, keyword_idea)
+
+    if semantic_idea_conf >= 0.25:
+        idea_type = semantic_idea
+    else:
+        idea_type = keyword_idea
+
+    keyword_sent = keyword_sentiment(text, idea_type)
+    semantic_sent, semantic_sent_conf = semantic_best_label(text, SENTIMENT_PROTOTYPES, keyword_sent)
+
+    if semantic_sent_conf >= 0.20:
+        sentiment = semantic_sent
+    else:
+        sentiment = keyword_sent
+
+    scores = estimate_scores(project_name, description, category, idea_type, sentiment)
+    jury_fit_score = estimate_jury_fit(category, idea_type, sentiment, scores)
     jury_fit_status = fit_status_from_score(jury_fit_score)
+
+    confidence = 0.55
+
+    if semantic_idea_conf >= 0.35:
+        confidence += 0.10
+
+    if semantic_sent_conf >= 0.30:
+        confidence += 0.10
+
+    if len(description.split()) >= 35:
+        confidence += 0.10
+
+    confidence = round(clamp(confidence, 0.20, 0.90), 2)
 
     return {
         "idea_type_ai": idea_type,
@@ -412,12 +641,14 @@ def auto_estimate_all(project_name, description, category):
         **scores,
         "jury_fit_score": jury_fit_score,
         "jury_fit_status": jury_fit_status,
-        "classification_confidence": 0.75
+        "classification_confidence": confidence,
+        "semantic_idea_confidence": round(float(semantic_idea_conf), 3),
+        "semantic_sentiment_confidence": round(float(semantic_sent_conf), 3)
     }
 
 
 # ============================================================
-# PREDICTION AND EXPLANATION
+# PREDICTION
 # ============================================================
 
 def predict_campaign_potential(input_row):
@@ -430,8 +661,10 @@ def predict_campaign_potential(input_row):
         new_data[col] = new_data[col].fillna("Unknown").astype(str)
 
     new_data = new_data[features]
+
     predicted_score = rf_regressor_final.predict(new_data)[0]
     prob_high_award = rf_classifier_final.predict_proba(new_data)[0, 1]
+
     return round(float(predicted_score), 1), round(float(prob_high_award), 3)
 
 
@@ -482,37 +715,52 @@ def explain_campaign(inputs, predicted_score, prob_high_award):
 
 
 # ============================================================
-# STREAMLIT UI
+# UI
 # ============================================================
 
 st.title("🏆 Cannes Creative Potential Calculator")
-st.caption("Modelo exploratorio para estimar potencial Cannes a partir de variables creativas, categoría y afinidad con jurado. No usa marca ni agencia como predictor.")
+st.caption(
+    "Modelo exploratorio para estimar potencial Cannes a partir de descripción, variables creativas, "
+    "categoría y afinidad con jurado. No usa marca ni agencia como predictor."
+)
 
 with st.sidebar:
     st.header("Configuración")
-    st.info("Primero escribe la descripción y usa Autoestimar. Después ajusta manualmente si lo necesitas.")
+    st.info("Escribe una descripción clara, usa Autoestimar con IA abierta y ajusta manualmente si hace falta.")
     show_importance = st.checkbox("Mostrar importancia de variables", value=True)
+    st.caption("Autoestimación semántica: sentence-transformers/all-MiniLM-L6-v2")
 
 category_options = training_categories.get("category_norm", []) or [
-    "Film", "Outdoor", "Titanium", "Innovation", "Public Relations", "Brand Experience & Activation", "Media", "Design", "Direct"
+    "Film",
+    "Outdoor",
+    "Titanium",
+    "Innovation",
+    "Public Relations",
+    "Brand Experience & Activation",
+    "Media",
+    "Design",
+    "Direct"
 ]
-subcategory_options = training_categories.get("subcategory", []) or ["Unknown"]
-idea_type_options = training_categories.get("idea_type_ai", []) or list(IDEA_KEYWORDS.keys())
-sentiment_options = training_categories.get("sentiment_ai", []) or list(SENTIMENT_KEYWORDS.keys())
 
-# Session state defaults
+subcategory_options = training_categories.get("subcategory", []) or ["Unknown"]
+idea_type_options = training_categories.get("idea_type_ai", []) or list(IDEA_PROTOTYPES.keys())
+sentiment_options = training_categories.get("sentiment_ai", []) or list(SENTIMENT_PROTOTYPES.keys())
+
 DEFAULTS = {
-    "idea_type_ai": "emotional storytelling",
-    "sentiment_ai": "hopeful",
-    "cultural_relevance": 7.0,
-    "viral_potential": 7.0,
-    "simplicity_of_insight": 8.0,
-    "execution_complexity": 6.0,
+    "idea_type_ai_select": "emotional storytelling",
+    "sentiment_ai_select": "hopeful",
+    "cultural_relevance": 3.0,
+    "viral_potential": 2.0,
+    "simplicity_of_insight": 4.0,
+    "execution_complexity": 2.0,
     "tech_component_ai": 0,
     "social_impact_ai": 0,
-    "jury_fit_score": 65.0,
-    "classification_confidence": 0.80
+    "jury_fit_score": 30.0,
+    "classification_confidence": 0.35,
+    "semantic_idea_confidence": 0.0,
+    "semantic_sentiment_confidence": 0.0
 }
+
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
@@ -520,42 +768,105 @@ for key, value in DEFAULTS.items():
 st.subheader("Evaluar una idea")
 
 col1, col2 = st.columns(2)
+
 with col1:
     project_name = st.text_input("Nombre del proyecto", "La Ola más grande del mundo")
+
     project_description = st.text_area(
         "Descripción de la idea",
-        "Describe brevemente qué sucede, dónde vive la campaña, qué problema resuelve y por qué sería relevante.",
-        height=140
+        "Describe qué sucede, dónde vive la campaña, qué problema o tensión cultural aborda, "
+        "por qué sería relevante y cómo generaría conversación.",
+        height=160
     )
+
     category_norm = st.selectbox("Categoría Cannes", category_options)
     subcategory = st.selectbox("Subcategoría", subcategory_options)
 
-    if st.button("Autoestimar variables", type="secondary"):
+    if not has_enough_creative_information(project_name, project_description):
+        st.warning(
+            "La descripción todavía es muy corta o genérica. Agrega qué sucede, dónde vive la idea, "
+            "qué la hace relevante y por qué generaría conversación."
+        )
+
+    if st.button("Autoestimar variables con IA abierta", type="secondary"):
         auto = auto_estimate_all(project_name, project_description, category_norm)
-        for key, value in auto.items():
-            st.session_state[key] = value
-        st.success("Variables autoestimadas. Revísalas y ajusta manualmente si hace falta.")
+
+        st.session_state["idea_type_ai_select"] = auto["idea_type_ai"]
+        st.session_state["sentiment_ai_select"] = auto["sentiment_ai"]
+        st.session_state["cultural_relevance"] = auto["cultural_relevance"]
+        st.session_state["viral_potential"] = auto["viral_potential"]
+        st.session_state["simplicity_of_insight"] = auto["simplicity_of_insight"]
+        st.session_state["execution_complexity"] = auto["execution_complexity"]
+        st.session_state["tech_component_ai"] = auto["tech_component_ai"]
+        st.session_state["social_impact_ai"] = auto["social_impact_ai"]
+        st.session_state["jury_fit_score"] = auto["jury_fit_score"]
+        st.session_state["classification_confidence"] = auto["classification_confidence"]
+        st.session_state["semantic_idea_confidence"] = auto["semantic_idea_confidence"]
+        st.session_state["semantic_sentiment_confidence"] = auto["semantic_sentiment_confidence"]
+
+        st.rerun()
 
 with col2:
-    idea_index = idea_type_options.index(st.session_state["idea_type_ai"]) if st.session_state["idea_type_ai"] in idea_type_options else 0
-    sentiment_index = sentiment_options.index(st.session_state["sentiment_ai"]) if st.session_state["sentiment_ai"] in sentiment_options else 0
+    if st.session_state["idea_type_ai_select"] not in idea_type_options:
+        idea_type_options = [st.session_state["idea_type_ai_select"]] + idea_type_options
 
-    idea_type_ai = st.selectbox("Tipo de idea", idea_type_options, index=idea_index, key="idea_type_ai_select")
-    sentiment_ai = st.selectbox("Sentimiento principal", sentiment_options, index=sentiment_index, key="sentiment_ai_select")
+    if st.session_state["sentiment_ai_select"] not in sentiment_options:
+        sentiment_options = [st.session_state["sentiment_ai_select"]] + sentiment_options
 
-    # Sync selectbox values into session state for scoring
-    st.session_state["idea_type_ai"] = idea_type_ai
-    st.session_state["sentiment_ai"] = sentiment_ai
+    idea_type_ai = st.selectbox(
+        "Tipo de idea",
+        idea_type_options,
+        key="idea_type_ai_select"
+    )
+
+    sentiment_ai = st.selectbox(
+        "Sentimiento principal",
+        sentiment_options,
+        key="sentiment_ai_select"
+    )
+
+    st.caption(
+        f"Confianza semántica idea: {st.session_state.get('semantic_idea_confidence', 0):.3f} · "
+        f"Confianza semántica sentimiento: {st.session_state.get('semantic_sentiment_confidence', 0):.3f}"
+    )
 
 st.divider()
 st.markdown("### Variables creativas autoestimadas / editables")
 
 col3, col4 = st.columns(2)
+
 with col3:
-    cultural_relevance = st.slider("Relevancia cultural", 1.0, 10.0, float(st.session_state["cultural_relevance"]), 0.5, key="cultural_relevance_slider")
-    viral_potential = st.slider("Potencial viral / PR", 1.0, 10.0, float(st.session_state["viral_potential"]), 0.5, key="viral_potential_slider")
-    simplicity_of_insight = st.slider("Simplicidad del insight", 1.0, 10.0, float(st.session_state["simplicity_of_insight"]), 0.5, key="simplicity_slider")
-    execution_complexity = st.slider("Complejidad de ejecución", 1.0, 10.0, float(st.session_state["execution_complexity"]), 0.5, key="execution_slider")
+    cultural_relevance = st.slider(
+        "Relevancia cultural",
+        1.0,
+        10.0,
+        float(st.session_state["cultural_relevance"]),
+        0.5
+    )
+
+    viral_potential = st.slider(
+        "Potencial viral / PR",
+        1.0,
+        10.0,
+        float(st.session_state["viral_potential"]),
+        0.5
+    )
+
+    simplicity_of_insight = st.slider(
+        "Simplicidad del insight",
+        1.0,
+        10.0,
+        float(st.session_state["simplicity_of_insight"]),
+        0.5
+    )
+
+    execution_complexity = st.slider(
+        "Complejidad de ejecución",
+        1.0,
+        10.0,
+        float(st.session_state["execution_complexity"]),
+        0.5
+    )
 
 with col4:
     tech_component_ai = st.radio(
@@ -563,40 +874,53 @@ with col4:
         [0, 1],
         index=int(st.session_state["tech_component_ai"]),
         format_func=lambda x: "Sí" if x == 1 else "No",
-        horizontal=True,
-        key="tech_radio"
+        horizontal=True
     )
+
     social_impact_ai = st.radio(
         "Impacto social",
         [0, 1],
         index=int(st.session_state["social_impact_ai"]),
         format_func=lambda x: "Sí" if x == 1 else "No",
-        horizontal=True,
-        key="social_radio"
+        horizontal=True
     )
 
-    auto_jury_fit = auto_estimate_jury_fit(
-        category_norm,
-        idea_type_ai,
-        sentiment_ai,
-        {
-            "cultural_relevance": cultural_relevance,
-            "viral_potential": viral_potential,
-            "simplicity_of_insight": simplicity_of_insight,
-            "execution_complexity": execution_complexity,
-            "tech_component_ai": tech_component_ai,
-            "social_impact_ai": social_impact_ai,
-        }
-    )
+    current_scores = {
+        "cultural_relevance": cultural_relevance,
+        "viral_potential": viral_potential,
+        "simplicity_of_insight": simplicity_of_insight,
+        "execution_complexity": execution_complexity,
+        "tech_component_ai": tech_component_ai,
+        "social_impact_ai": social_impact_ai
+    }
 
     if st.button("Recalcular Jury Fit con variables actuales"):
-        st.session_state["jury_fit_score"] = auto_jury_fit
+        st.session_state["jury_fit_score"] = estimate_jury_fit(
+            category_norm,
+            idea_type_ai,
+            sentiment_ai,
+            current_scores
+        )
+        st.rerun()
 
-    jury_fit_score = st.slider("Jury Fit Score", 0.0, 100.0, float(st.session_state["jury_fit_score"]), 1.0, key="jury_slider")
+    jury_fit_score = st.slider(
+        "Jury Fit Score",
+        0.0,
+        100.0,
+        float(st.session_state["jury_fit_score"]),
+        1.0
+    )
+
     jury_fit_status = fit_status_from_score(jury_fit_score)
     st.write(f"Afinidad: **{jury_fit_status}**")
 
-classification_confidence = st.slider("Confianza de clasificación", 0.0, 1.0, float(st.session_state["classification_confidence"]), 0.05)
+classification_confidence = st.slider(
+    "Confianza de clasificación",
+    0.0,
+    1.0,
+    float(st.session_state["classification_confidence"]),
+    0.05
+)
 
 input_row = {
     "cultural_relevance": cultural_relevance,
@@ -623,11 +947,13 @@ if st.button("Calcular potencial Cannes", type="primary"):
     st.subheader(project_name)
 
     metric1, metric2, metric3 = st.columns(3)
+
     metric1.metric("Cannes Score estimado", f"{predicted_score}/100")
     metric2.metric("Probabilidad High Award", f"{prob_high_award * 100:.1f}%")
     metric3.metric("Etiqueta", label)
 
     st.markdown("### Lectura estratégica")
+
     if strengths:
         st.markdown("**Fortalezas**")
         for item in strengths:
@@ -658,10 +984,12 @@ if st.button("Calcular potencial Cannes", type="primary"):
     )
 
 st.divider()
+
 st.subheader("Evaluación masiva")
 st.write("Sube un CSV o Excel con las columnas de entrada para evaluar varias ideas.")
 
 bulk_file = st.file_uploader("Subir archivo de ideas", type=["csv", "xlsx"])
+
 if bulk_file is not None:
     if bulk_file.name.endswith(".csv"):
         ideas_df = pd.read_csv(bulk_file)
@@ -669,13 +997,17 @@ if bulk_file is not None:
         ideas_df = pd.read_excel(bulk_file)
 
     missing = [c for c in features if c not in ideas_df.columns]
+
     if missing:
         st.error(f"Faltan columnas: {missing}")
+
     else:
         predictions = []
+
         for _, row in ideas_df.iterrows():
             row_input = {c: row[c] for c in features}
             pred_score, pred_prob = predict_campaign_potential(row_input)
+
             predictions.append({
                 "predicted_cannes_score": pred_score,
                 "prob_high_award": pred_prob,
@@ -685,6 +1017,7 @@ if bulk_file is not None:
 
         pred_df = pd.concat([ideas_df.reset_index(drop=True), pd.DataFrame(predictions)], axis=1)
         st.dataframe(pred_df, use_container_width=True)
+
         st.download_button(
             label="Descargar evaluación masiva CSV",
             data=pred_df.to_csv(index=False).encode("utf-8"),
@@ -699,4 +1032,7 @@ if show_importance and not importance_df.empty:
     st.bar_chart(importance_df.head(15).set_index("feature")["importance"])
 
 st.divider()
-st.caption("Modelo exploratorio desarrollado para ISA. No debe interpretarse como garantía de premio; sirve como herramienta de priorización creativa.")
+st.caption(
+    "Modelo exploratorio desarrollado para ISA. No debe interpretarse como garantía de premio; "
+    "sirve como herramienta de priorización creativa."
+)
