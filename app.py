@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
+import re
 
 st.set_page_config(
     page_title="Cannes Creative Potential Calculator",
@@ -10,7 +11,7 @@ st.set_page_config(
 )
 
 # ============================================================
-# LOAD MODELS
+# CARGA DE MODELOS Y ARCHIVOS
 # ============================================================
 
 @st.cache_resource
@@ -28,6 +29,16 @@ def load_embedding_model():
         return None
 
 
+@st.cache_data
+def load_jury_profiles():
+    try:
+        jury_df = pd.read_csv("jury_profiles.csv")
+        jury_df.columns = jury_df.columns.str.strip()
+        return jury_df
+    except Exception:
+        return pd.DataFrame()
+
+
 bundle = load_model_bundle()
 
 rf_regressor_final = bundle["rf_regressor_final"]
@@ -39,10 +50,11 @@ importance_df = bundle.get("importance_df", pd.DataFrame())
 training_categories = bundle.get("training_categories", {})
 
 embedding_model = load_embedding_model()
+jury_profiles_df = load_jury_profiles()
 
 
 # ============================================================
-# HELPERS
+# FUNCIONES BASE
 # ============================================================
 
 def clamp(value, low, high):
@@ -74,6 +86,51 @@ def fit_status_from_score(score):
     return "baja afinidad"
 
 
+def normalize_key(x):
+    x = str(x).lower().strip()
+    replacements = {
+        "á": "a",
+        "é": "e",
+        "í": "i",
+        "ó": "o",
+        "ú": "u",
+        "ñ": "n",
+        "&": "and"
+    }
+
+    for a, b in replacements.items():
+        x = x.replace(a, b)
+
+    x = re.sub(r"[^a-z0-9]+", " ", x)
+    x = re.sub(r"\s+", " ", x).strip()
+
+    return x
+
+
+def get_jury_profile(category_norm):
+    if jury_profiles_df.empty:
+        return None
+
+    category_key = normalize_key(category_norm)
+
+    temp = jury_profiles_df.copy()
+    temp["category_key"] = temp["category_norm"].apply(normalize_key)
+
+    exact_match = temp[temp["category_key"] == category_key]
+
+    if not exact_match.empty:
+        return exact_match.iloc[0].to_dict()
+
+    partial_match = temp[
+        temp["category_key"].apply(lambda x: x in category_key or category_key in x)
+    ]
+
+    if not partial_match.empty:
+        return partial_match.iloc[0].to_dict()
+
+    return None
+
+
 def has_enough_creative_information(project_name, description):
     text = f"{project_name} {description}".lower().strip()
     words = [w for w in text.split() if len(w) > 2]
@@ -98,7 +155,7 @@ def has_enough_creative_information(project_name, description):
 
 
 # ============================================================
-# OPEN-SOURCE AI PROTOTYPES
+# PROTOTIPOS SEMÁNTICOS PARA IA ABIERTA
 # ============================================================
 
 IDEA_PROTOTYPES = {
@@ -150,6 +207,7 @@ IDEA_PROTOTYPES = {
     )
 }
 
+
 SENTIMENT_PROTOTYPES = {
     "funny": "The idea feels funny, comedic, playful, humorous, satirical or entertaining.",
     "hopeful": "The idea feels hopeful, optimistic, positive, future-facing and uplifting.",
@@ -160,6 +218,10 @@ SENTIMENT_PROTOTYPES = {
     "nostalgic": "The idea feels nostalgic, tied to memory, childhood, heritage, home, tradition or legacy."
 }
 
+
+# ============================================================
+# KEYWORDS PARA RESPALDO DE CLASIFICACIÓN
+# ============================================================
 
 IDEA_KEYWORDS = {
     "public relations stunt": [
@@ -229,35 +291,156 @@ IDEA_KEYWORDS = {
     ]
 }
 
+
 SENTIMENT_KEYWORDS = {
-    "funny": ["funny", "humor", "laugh", "risa", "joke", "broma", "comedy", "parody", "meme", "satire"],
-    "hopeful": ["hope", "esperanza", "future", "futuro", "change", "cambio", "better", "mejor", "progress", "progreso", "support", "apoyo", "aspiración", "mundial"],
-    "inspirational": ["inspire", "inspirar", "hero", "héroe", "courage", "valor", "brave", "valiente", "empower", "empoderar", "celebrate", "celebrar", "orgullo"],
-    "sad": ["sad", "triste", "lost", "perdido", "death", "muerte", "grief", "duelo", "abuse", "abuso", "hunger", "hambre", "poverty", "pobreza", "illness", "enfermedad"],
-    "tense": ["anger", "enojo", "fight", "lucha", "war", "guerra", "conflict", "conflicto", "crisis", "protest", "protesta", "threat", "amenaza", "risk", "riesgo"],
-    "shocking": ["shock", "impactante", "danger", "peligro", "unexpected", "inesperado", "surprise", "sorpresa", "taboo", "scandal", "escándalo", "hidden", "oculto", "exposed"],
-    "nostalgic": ["memory", "memoria", "remember", "recordar", "childhood", "infancia", "home", "hogar", "past", "pasado", "heritage", "tradición", "legacy", "legado"]
-}
-
-
-CATEGORY_PROFILES = {
-    "film": {"emotional": 0.25, "culture": 0.15, "viral": 0.10, "simplicity": 0.20, "execution": 0.20, "tech": 0.03, "social": 0.07},
-    "film craft": {"emotional": 0.15, "culture": 0.10, "viral": 0.05, "simplicity": 0.10, "execution": 0.45, "tech": 0.05, "social": 0.10},
-    "public relations": {"emotional": 0.08, "culture": 0.22, "viral": 0.35, "simplicity": 0.10, "execution": 0.08, "tech": 0.04, "social": 0.13},
-    "pr": {"emotional": 0.08, "culture": 0.22, "viral": 0.35, "simplicity": 0.10, "execution": 0.08, "tech": 0.04, "social": 0.13},
-    "outdoor": {"emotional": 0.08, "culture": 0.18, "viral": 0.28, "simplicity": 0.22, "execution": 0.14, "tech": 0.03, "social": 0.07},
-    "innovation": {"emotional": 0.05, "culture": 0.12, "viral": 0.08, "simplicity": 0.10, "execution": 0.18, "tech": 0.32, "social": 0.15},
-    "titanium": {"emotional": 0.15, "culture": 0.25, "viral": 0.20, "simplicity": 0.10, "execution": 0.10, "tech": 0.08, "social": 0.12},
-    "brand experience": {"emotional": 0.10, "culture": 0.15, "viral": 0.22, "simplicity": 0.10, "execution": 0.25, "tech": 0.08, "social": 0.10},
-    "direct": {"emotional": 0.08, "culture": 0.14, "viral": 0.15, "simplicity": 0.20, "execution": 0.10, "tech": 0.08, "social": 0.25},
-    "design": {"emotional": 0.08, "culture": 0.12, "viral": 0.08, "simplicity": 0.20, "execution": 0.32, "tech": 0.08, "social": 0.12},
-    "media": {"emotional": 0.08, "culture": 0.18, "viral": 0.30, "simplicity": 0.12, "execution": 0.10, "tech": 0.10, "social": 0.12},
-    "default": {"emotional": 0.14, "culture": 0.18, "viral": 0.18, "simplicity": 0.15, "execution": 0.15, "tech": 0.08, "social": 0.12},
+    "funny": [
+        "funny", "humor", "laugh", "risa", "joke", "broma", "comedy", "parody", "meme", "satire"
+    ],
+    "hopeful": [
+        "hope", "esperanza", "future", "futuro", "change", "cambio", "better", "mejor",
+        "progress", "progreso", "support", "apoyo", "aspiración", "mundial"
+    ],
+    "inspirational": [
+        "inspire", "inspirar", "hero", "héroe", "courage", "valor", "brave", "valiente",
+        "empower", "empoderar", "celebrate", "celebrar", "orgullo"
+    ],
+    "sad": [
+        "sad", "triste", "lost", "perdido", "death", "muerte", "grief", "duelo",
+        "abuse", "abuso", "hunger", "hambre", "poverty", "pobreza", "illness", "enfermedad"
+    ],
+    "tense": [
+        "anger", "enojo", "fight", "lucha", "war", "guerra", "conflict", "conflicto",
+        "crisis", "protest", "protesta", "threat", "amenaza", "risk", "riesgo"
+    ],
+    "shocking": [
+        "shock", "impactante", "danger", "peligro", "unexpected", "inesperado",
+        "surprise", "sorpresa", "taboo", "scandal", "escándalo", "hidden", "oculto", "exposed"
+    ],
+    "nostalgic": [
+        "memory", "memoria", "remember", "recordar", "childhood", "infancia",
+        "home", "hogar", "past", "pasado", "heritage", "tradición", "legacy", "legado"
+    ]
 }
 
 
 # ============================================================
-# SEMANTIC + RULE-BASED AUTOESTIMATION
+# PESOS DE JURY FIT POR CATEGORÍA
+# ============================================================
+
+CATEGORY_PROFILES = {
+    "film": {
+        "emotional": 0.25,
+        "culture": 0.15,
+        "viral": 0.10,
+        "simplicity": 0.20,
+        "execution": 0.20,
+        "tech": 0.03,
+        "social": 0.07
+    },
+    "film craft": {
+        "emotional": 0.15,
+        "culture": 0.10,
+        "viral": 0.05,
+        "simplicity": 0.10,
+        "execution": 0.45,
+        "tech": 0.05,
+        "social": 0.10
+    },
+    "public relations": {
+        "emotional": 0.08,
+        "culture": 0.22,
+        "viral": 0.35,
+        "simplicity": 0.10,
+        "execution": 0.08,
+        "tech": 0.04,
+        "social": 0.13
+    },
+    "pr": {
+        "emotional": 0.08,
+        "culture": 0.22,
+        "viral": 0.35,
+        "simplicity": 0.10,
+        "execution": 0.08,
+        "tech": 0.04,
+        "social": 0.13
+    },
+    "outdoor": {
+        "emotional": 0.08,
+        "culture": 0.18,
+        "viral": 0.28,
+        "simplicity": 0.22,
+        "execution": 0.14,
+        "tech": 0.03,
+        "social": 0.07
+    },
+    "innovation": {
+        "emotional": 0.05,
+        "culture": 0.12,
+        "viral": 0.08,
+        "simplicity": 0.10,
+        "execution": 0.18,
+        "tech": 0.32,
+        "social": 0.15
+    },
+    "titanium": {
+        "emotional": 0.15,
+        "culture": 0.25,
+        "viral": 0.20,
+        "simplicity": 0.10,
+        "execution": 0.10,
+        "tech": 0.08,
+        "social": 0.12
+    },
+    "brand experience": {
+        "emotional": 0.10,
+        "culture": 0.15,
+        "viral": 0.22,
+        "simplicity": 0.10,
+        "execution": 0.25,
+        "tech": 0.08,
+        "social": 0.10
+    },
+    "direct": {
+        "emotional": 0.08,
+        "culture": 0.14,
+        "viral": 0.15,
+        "simplicity": 0.20,
+        "execution": 0.10,
+        "tech": 0.08,
+        "social": 0.25
+    },
+    "design": {
+        "emotional": 0.08,
+        "culture": 0.12,
+        "viral": 0.08,
+        "simplicity": 0.20,
+        "execution": 0.32,
+        "tech": 0.08,
+        "social": 0.12
+    },
+    "media": {
+        "emotional": 0.08,
+        "culture": 0.18,
+        "viral": 0.30,
+        "simplicity": 0.12,
+        "execution": 0.10,
+        "tech": 0.10,
+        "social": 0.12
+    },
+    "default": {
+        "emotional": 0.14,
+        "culture": 0.18,
+        "viral": 0.18,
+        "simplicity": 0.15,
+        "execution": 0.15,
+        "tech": 0.08,
+        "social": 0.12
+    }
+}
+
+
+# ============================================================
+# AUTOESTIMACIÓN SEMÁNTICA + REGLAS
 # ============================================================
 
 def semantic_best_label(text, prototypes, fallback_label):
@@ -270,17 +453,19 @@ def semantic_best_label(text, prototypes, fallback_label):
         labels = list(prototypes.keys())
         prototype_texts = [prototypes[label] for label in labels]
 
-        embeddings = embedding_model.encode([text] + prototype_texts, convert_to_tensor=True)
+        embeddings = embedding_model.encode(
+            [text] + prototype_texts,
+            convert_to_tensor=True
+        )
+
         query_embedding = embeddings[0]
         prototype_embeddings = embeddings[1:]
 
         similarities = util.cos_sim(query_embedding, prototype_embeddings)[0].cpu().numpy()
+
         best_idx = int(np.argmax(similarities))
 
-        best_label = labels[best_idx]
-        best_score = float(similarities[best_idx])
-
-        return best_label, best_score
+        return labels[best_idx], float(similarities[best_idx])
 
     except Exception:
         return fallback_label, 0.0
@@ -378,7 +563,16 @@ def keyword_sentiment(text, idea_type):
     if idea_type == "public relations stunt":
         scores["shocking"] += 1
 
-    priority = ["shocking", "funny", "tense", "hopeful", "nostalgic", "sad", "inspirational"]
+    priority = [
+        "shocking",
+        "funny",
+        "tense",
+        "hopeful",
+        "nostalgic",
+        "sad",
+        "inspirational"
+    ]
+
     max_score = max(scores.values())
 
     if max_score == 0:
@@ -415,6 +609,7 @@ def estimate_scores(project_name, description, category, idea_type, sentiment):
     text = f"{project_name} {description} {category} {idea_type} {sentiment}".lower()
 
     social_words = IDEA_KEYWORDS["social impact"] + IDEA_KEYWORDS["activism"]
+
     viral_words = IDEA_KEYWORDS["public relations stunt"] + [
         "viral",
         "share",
@@ -425,7 +620,9 @@ def estimate_scores(project_name, description, category, idea_type, sentiment):
         "medios",
         "prensa"
     ]
+
     tech_words = IDEA_KEYWORDS["technology-driven idea"]
+
     complexity_words = [
         "installation",
         "instalación",
@@ -450,6 +647,7 @@ def estimate_scores(project_name, description, category, idea_type, sentiment):
         "ciudad",
         "nacional"
     ]
+
     simplicity_words = [
         "simple",
         "simplicity",
@@ -648,7 +846,7 @@ def auto_estimate_all(project_name, description, category):
 
 
 # ============================================================
-# PREDICTION
+# PREDICCIÓN
 # ============================================================
 
 def predict_campaign_potential(input_row):
@@ -715,19 +913,21 @@ def explain_campaign(inputs, predicted_score, prob_high_award):
 
 
 # ============================================================
-# UI
+# INTERFAZ STREAMLIT
 # ============================================================
 
 st.title("🏆 Cannes Creative Potential Calculator")
+
 st.caption(
     "Modelo exploratorio para estimar potencial Cannes a partir de descripción, variables creativas, "
-    "categoría y afinidad con jurado. No usa marca ni agencia como predictor."
+    "categoría, jurado y afinidad. No usa marca ni agencia como predictor."
 )
 
 with st.sidebar:
     st.header("Configuración")
     st.info("Escribe una descripción clara, usa Autoestimar con IA abierta y ajusta manualmente si hace falta.")
     show_importance = st.checkbox("Mostrar importancia de variables", value=True)
+    show_jury_details = st.checkbox("Mostrar jurado y afinidades", value=True)
     st.caption("Autoestimación semántica: sentence-transformers/all-MiniLM-L6-v2")
 
 category_options = training_categories.get("category_norm", []) or [
@@ -781,6 +981,38 @@ with col1:
 
     category_norm = st.selectbox("Categoría Cannes", category_options)
     subcategory = st.selectbox("Subcategoría", subcategory_options)
+
+    jury_profile = get_jury_profile(category_norm)
+
+    if show_jury_details:
+        st.markdown("### Jurado / afinidad de categoría")
+
+        if jury_profile is not None:
+            st.write(f"**Jurado:** {jury_profile.get('jury_president_name', 'No disponible')}")
+            st.write(f"**Rol:** {jury_profile.get('jury_role', 'No disponible')}")
+            st.write(f"**Afinidad general:** {jury_profile.get('affinity_summary', 'No disponible')}")
+
+            affinities = [
+                jury_profile.get("affinity_1", ""),
+                jury_profile.get("affinity_2", ""),
+                jury_profile.get("affinity_3", ""),
+                jury_profile.get("affinity_4", "")
+            ]
+
+            affinities = [a for a in affinities if str(a).strip() != ""]
+
+            if affinities:
+                st.write("**Qué suele valorar:**")
+                for affinity in affinities:
+                    st.write(f"• {affinity}")
+
+            watchout = jury_profile.get("watchout", "")
+
+            if str(watchout).strip() != "":
+                st.warning(f"Watchout: {watchout}")
+
+        else:
+            st.info("No hay perfil específico de jurado para esta categoría. Se usará el perfil general de afinidad por categoría.")
 
     if not has_enough_creative_information(project_name, project_description):
         st.warning(
@@ -954,6 +1186,11 @@ if st.button("Calcular potencial Cannes", type="primary"):
 
     st.markdown("### Lectura estratégica")
 
+    if jury_profile is not None:
+        st.markdown("**Contexto de jurado / categoría**")
+        st.write(f"Jurado: {jury_profile.get('jury_president_name', 'No disponible')}")
+        st.write(f"Afinidad esperada: {jury_profile.get('affinity_summary', 'No disponible')}")
+
     if strengths:
         st.markdown("**Fortalezas**")
         for item in strengths:
@@ -967,6 +1204,9 @@ if st.button("Calcular potencial Cannes", type="primary"):
     result_df = pd.DataFrame([{
         "project_name": project_name,
         "project_description": project_description,
+        "jury_president_name": jury_profile.get("jury_president_name", "") if jury_profile else "",
+        "jury_role": jury_profile.get("jury_role", "") if jury_profile else "",
+        "jury_affinity_summary": jury_profile.get("affinity_summary", "") if jury_profile else "",
         **input_row,
         "predicted_cannes_score": predicted_score,
         "prob_high_award": prob_high_award,
@@ -1015,7 +1255,11 @@ if bulk_file is not None:
                 "potential_label": score_label(pred_score)
             })
 
-        pred_df = pd.concat([ideas_df.reset_index(drop=True), pd.DataFrame(predictions)], axis=1)
+        pred_df = pd.concat(
+            [ideas_df.reset_index(drop=True), pd.DataFrame(predictions)],
+            axis=1
+        )
+
         st.dataframe(pred_df, use_container_width=True)
 
         st.download_button(
@@ -1032,6 +1276,7 @@ if show_importance and not importance_df.empty:
     st.bar_chart(importance_df.head(15).set_index("feature")["importance"])
 
 st.divider()
+
 st.caption(
     "Modelo exploratorio desarrollado para ISA. No debe interpretarse como garantía de premio; "
     "sirve como herramienta de priorización creativa."
