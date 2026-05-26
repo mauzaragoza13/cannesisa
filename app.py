@@ -1024,7 +1024,7 @@ def explain_campaign(inputs, predicted_score, prob_high_award):
 # INTERFAZ STREAMLIT
 # ============================================================
 
-st.title("🏆 Cannes Creative Potential Calculator")
+st.title("🦁 Cannes Creative Potential Calculator")
 
 st.caption(
     "Modelo exploratorio para estimar potencial Cannes a partir de descripción, variables creativas, "
