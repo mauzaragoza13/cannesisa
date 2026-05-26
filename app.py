@@ -848,110 +848,293 @@ def auto_estimate_all(project_name, description, category):
 
 
 # ============================================================
-# SCORE DIRECTO BASADO EN TEXTO
+# SCORE DIRECTO BASADO EN TEXTO + PENALTY ENGINE CANNES
 # ============================================================
+
+BAD_SIGNALS = [
+    "discount", "descuento", "sale", "oferta", "promo", "promoción", "promocion",
+    "20%", "30%", "40%", "50%", "limited time", "tiempo limitado",
+    "buy now", "compra ahora", "call to action", "cta", "logo grande",
+    "product shot", "foto del producto", "post en instagram", "instagram post",
+    "social media posts", "posts de redes", "banner", "display ads", "anuncio display",
+    "flyer", "volante", "comercial tradicional", "spot tradicional", "catálogo", "catalogo",
+    "email blast", "newsletter", "landing page", "performance", "retail", "ecommerce",
+    "giveaway", "sorteo", "cupón", "cupon", "rebaja", "black friday", "hot sale"
+]
+
+CANNES_POSITIVE_SIGNALS = {
+    "cultural_tension": [
+        "tensión cultural", "tension cultural", "cultural tension", "problema cultural",
+        "tabú", "taboo", "prejuicio", "estigma", "debate", "conversación social",
+        "conversacion social", "movimiento", "movement", "causa", "inequality", "desigualdad",
+        "discriminación", "discriminacion", "derechos", "rights", "climate", "clima"
+    ],
+    "earned_media": [
+        "earned media", "prensa", "medios", "noticia", "news", "viral", "share",
+        "compartir", "conversación", "conversacion", "buzz", "public conversation",
+        "talk of", "trend", "trending", "récord", "record", "world's first", "first ever",
+        "primera vez", "nunca antes"
+    ],
+    "participation": [
+        "participa", "participación", "participacion", "invita a la gente", "usuarios",
+        "comunidad", "community", "crowdsourced", "co-creación", "co-creacion",
+        "interactive", "interactivo", "reto", "challenge", "activación", "activacion",
+        "instalación", "instalacion", "experiencia", "experience"
+    ],
+    "craft_or_execution": [
+        "film", "documental", "documentary", "instalación", "instalacion", "prototype",
+        "prototipo", "plataforma", "app", "ai", "inteligencia artificial", "data",
+        "sensor", "realidad aumentada", "augmented reality", "diseño", "design",
+        "packaging", "producto", "product innovation"
+    ],
+    "human_truth": [
+        "historia real", "real story", "testimonio", "testimony", "familia", "family",
+        "memoria", "memory", "identidad", "identity", "orgullo", "pride", "sueño", "dream",
+        "vida", "life", "personas", "people", "human", "humano"
+    ]
+}
+
+WEAK_OR_GENERIC_SIGNALS = [
+    "innovador", "innovadora", "disruptivo", "disruptiva", "impactante", "creativo",
+    "creativa", "único", "unico", "emocionante", "diferente", "gran campaña",
+    "gran campana", "experiencia increíble", "experiencia increible", "muy original",
+    "llamativo", "atractivo", "moderno", "premium", "aspiracional"
+]
+
+
+def keyword_hits(text, words):
+    text = str(text).lower()
+    hits = []
+    for w in words:
+        if str(w).lower() in text:
+            hits.append(w)
+    return hits
+
+
+def calculate_commodity_penalty(project_name, description):
+    """
+    Detecta ideas que suenan a publicidad tradicional, performance o promoción retail.
+    Esta capa evita que una idea mala llegue a shortlist solo por categoría.
+    """
+    text = f"{project_name} {description}".lower()
+    words = [w for w in re.findall(r"\b\w+\b", text) if len(w) > 2]
+    bad_hits = keyword_hits(text, BAD_SIGNALS)
+    generic_hits = keyword_hits(text, WEAK_OR_GENERIC_SIGNALS)
+
+    penalty = 0
+    reasons = []
+
+    if len(words) < 18:
+        penalty += 22
+        reasons.append("La descripción es demasiado corta: no permite ver una idea Cannes completa.")
+    elif len(words) < 35:
+        penalty += 12
+        reasons.append("La descripción es breve; falta tensión, mecánica, ejecución e impacto.")
+
+    if len(bad_hits) >= 5:
+        penalty += 35
+        reasons.append("Suena a promoción/publicidad commodity: " + ", ".join(bad_hits[:6]) + ".")
+    elif len(bad_hits) >= 3:
+        penalty += 25
+        reasons.append("Tiene varias señales de publicidad tradicional o promocional: " + ", ".join(bad_hits[:5]) + ".")
+    elif len(bad_hits) >= 1:
+        penalty += 10
+        reasons.append("Tiene señales promocionales que normalmente no son Cannes por sí solas: " + ", ".join(bad_hits[:3]) + ".")
+
+    if len(generic_hits) >= 3 and len(words) < 70:
+        penalty += 12
+        reasons.append("Usa lenguaje genérico sin explicar suficientemente la mecánica creativa.")
+
+    # Penalización especial: ideas de post/anuncio + descuento/compra.
+    promo_core = any(x in text for x in ["descuento", "discount", "promo", "promoción", "promocion", "oferta", "sale"])
+    ad_format = any(x in text for x in ["post", "instagram", "banner", "flyer", "anuncio", "logo", "compra ahora", "buy now"])
+    if promo_core and ad_format:
+        penalty += 25
+        reasons.append("La mecánica central parece ser descuento + pieza publicitaria; eso debe quedar en rango bajo salvo que exista una idea cultural fuerte.")
+
+    return clamp(penalty, 0, 70), reasons, bad_hits
+
+
+def calculate_cannes_originality_score(project_name, description):
+    """
+    Evalúa si el texto contiene señales reales de una idea tipo Cannes:
+    tensión cultural, earned media, participación, craft/ejecución y verdad humana.
+    """
+    text = f"{project_name} {description}".lower()
+    words = [w for w in re.findall(r"\b\w+\b", text) if len(w) > 2]
+
+    score = 0
+    reasons = []
+    dimension_scores = {}
+
+    for dimension, terms in CANNES_POSITIVE_SIGNALS.items():
+        hits = keyword_hits(text, terms)
+        if len(hits) >= 3:
+            points = 16
+        elif len(hits) == 2:
+            points = 12
+        elif len(hits) == 1:
+            points = 7
+        else:
+            points = 0
+        dimension_scores[dimension] = points
+        score += points
+
+    if len(words) >= 90:
+        score += 14
+        reasons.append("La descripción tiene profundidad suficiente para evaluar la mecánica.")
+    elif len(words) >= 55:
+        score += 10
+        reasons.append("La descripción tiene detalle razonable.")
+    elif len(words) >= 35:
+        score += 6
+        reasons.append("La descripción se entiende, pero todavía necesita más profundidad.")
+    else:
+        score += 2
+        reasons.append("La descripción no desarrolla suficiente la idea.")
+
+    if dimension_scores["cultural_tension"] == 0:
+        reasons.append("No se detecta tensión cultural clara.")
+    else:
+        reasons.append("Hay señal de tensión/relevancia cultural.")
+
+    if dimension_scores["earned_media"] == 0:
+        reasons.append("No se detecta una razón fuerte para generar earned media o conversación.")
+    else:
+        reasons.append("Hay potencial de conversación o earned media.")
+
+    if dimension_scores["participation"] == 0:
+        reasons.append("No se detecta participación pública, activación o experiencia clara.")
+    else:
+        reasons.append("Hay una mecánica participativa/experiencial.")
+
+    if dimension_scores["human_truth"] > 0:
+        reasons.append("Hay una verdad humana o emocional identificable.")
+
+    return round(clamp(score, 0, 100), 1), reasons, dimension_scores
+
 
 def calculate_text_quality_score(project_name, description, category):
     """
-    Score directo del texto para que la descripción también afecte la calificación final.
-    No reemplaza al Random Forest: funciona como una capa de calibración sobre la predicción.
+    Score directo del texto. Combina variables autoestimadas con un penalty engine.
+    La idea: el modelo puede opinar, pero el texto pone límites duros.
     """
     text = f"{project_name} {description}".lower().strip()
     words = [w for w in re.findall(r"\b\w+\b", text) if len(w) > 2]
 
-    if len(words) < 12:
-        return 20.0, ["Descripción demasiado corta para evaluar la idea con confianza."]
+    if len(words) < 8:
+        return 12.0, ["Descripción demasiado corta: no hay suficiente idea para evaluar."], 70, 0.0
 
     auto = auto_estimate_all(project_name, description, category)
+    originality_score, originality_reasons, _ = calculate_cannes_originality_score(project_name, description)
+    commodity_penalty, penalty_reasons, bad_hits = calculate_commodity_penalty(project_name, description)
 
+    # Base textual más conservadora que antes.
     score = 0
     reasons = []
 
-    # 1) Profundidad de información creativa
-    if len(words) >= 80:
-        score += 18
-        reasons.append("Descripción suficientemente detallada.")
-    elif len(words) >= 45:
-        score += 14
-        reasons.append("Descripción con detalle medio.")
-    elif len(words) >= 25:
-        score += 9
-        reasons.append("Descripción entendible, pero todavía breve.")
-    else:
-        score += 4
-        reasons.append("Descripción breve; falta más contexto creativo.")
+    # 1) Originalidad Cannes pesa mucho más que categoría.
+    score += originality_score * 0.48
 
-    # 2) Variables inferidas desde el texto
-    score += auto["cultural_relevance"] * 2.0
-    score += auto["viral_potential"] * 2.2
-    score += auto["simplicity_of_insight"] * 1.6
+    # 2) Variables inferidas pesan, pero con menor peso para no sobrepremiar keywords.
+    score += auto["cultural_relevance"] * 1.4
+    score += auto["viral_potential"] * 1.4
+    score += auto["simplicity_of_insight"] * 1.1
 
-    # La complejidad alta puede ser positiva, pero si es excesiva castiga
-    if auto["execution_complexity"] <= 7:
-        score += auto["execution_complexity"] * 1.1
-    else:
-        score += 7.0
-        reasons.append("La idea parece compleja; revisar factibilidad de ejecución.")
-
-    # 3) Señales Cannes: impacto, tecnología, earned media, cultura
-    if auto["social_impact_ai"] == 1:
-        score += 7
-        reasons.append("Detecta componente de impacto social.")
-
-    if auto["tech_component_ai"] == 1:
-        score += 5
-        reasons.append("Detecta componente tecnológico.")
-
-    if auto["jury_fit_score"] >= 75:
-        score += 10
-        reasons.append("Buena afinidad texto-categoría/jurado.")
-    elif auto["jury_fit_score"] >= 55:
-        score += 6
-        reasons.append("Afinidad media con la categoría.")
+    # 3) Ejecución suma solo si hay algo que ejecutar.
+    if auto["execution_complexity"] >= 5 and originality_score >= 35:
+        score += min(auto["execution_complexity"] * 1.0, 8)
     else:
         score += 2
-        reasons.append("Afinidad baja con la categoría seleccionada.")
 
-    # 4) Penalización si el texto es genérico
-    generic_words = [
-        "innovador", "disruptivo", "impactante", "creativo", "único", "unico",
-        "emocionante", "diferente", "experiencia increíble", "gran campaña"
-    ]
-    generic_count = count_keywords(text, generic_words)
+    # 4) Bonus Cannes moderados.
+    if auto["social_impact_ai"] == 1 and originality_score >= 35:
+        score += 6
+        reasons.append("Detecta impacto social con algo de sustancia creativa.")
 
-    if generic_count >= 3 and len(words) < 50:
-        score -= 12
-        reasons.append("El texto usa términos genéricos sin explicar la mecánica de la idea.")
+    if auto["tech_component_ai"] == 1 and originality_score >= 35:
+        score += 5
+        reasons.append("Detecta componente tecnológico con potencial creativo.")
+
+    if auto["jury_fit_score"] >= 75 and originality_score >= 45:
+        score += 6
+        reasons.append("Buena afinidad con categoría/jurado, respaldada por señales del texto.")
+    elif auto["jury_fit_score"] >= 55:
+        score += 3
+        reasons.append("Afinidad media con la categoría, pero no suficiente por sí sola.")
+
+    # 5) Penalizaciones fuertes.
+    score -= commodity_penalty
+
+    reasons.extend(originality_reasons)
+    reasons.extend(penalty_reasons)
+
+    # Caps duros: si la idea es commodity, no puede llegar a shortlist.
+    if commodity_penalty >= 55:
+        score = min(score, 38)
+        reasons.append("Cap aplicado: una idea commodity fuerte no puede superar rango bajo sin una mecánica cultural excepcional.")
+    elif commodity_penalty >= 35:
+        score = min(score, 48)
+        reasons.append("Cap aplicado: demasiadas señales promocionales para rango shortlist.")
+    elif originality_score < 25:
+        score = min(score, 45)
+        reasons.append("Cap aplicado: baja originalidad Cannes detectada en el texto.")
+    elif originality_score < 40 and commodity_penalty >= 20:
+        score = min(score, 55)
+        reasons.append("Cap aplicado: originalidad limitada + señales promocionales.")
 
     final_score = round(clamp(score, 0, 100), 1)
-    return final_score, reasons
+    return final_score, reasons, commodity_penalty, originality_score
 
 
-def blend_model_with_text_score(model_score, model_probability, text_score, description):
+def blend_model_with_text_score(model_score, model_probability, text_score, description, commodity_penalty=0, originality_score=0):
     """
-    Mezcla la predicción del modelo entrenado con un score textual.
-    Evita que una categoría por sí sola infle demasiado la probabilidad.
+    Mezcla la predicción del modelo con el score textual.
+    El texto ahora tiene más control que el RF cuando detecta baja originalidad o publicidad commodity.
     """
-    words = [w for w in str(description).split() if len(w) > 2]
+    words = [w for w in re.findall(r"\b\w+\b", str(description).lower()) if len(w) > 2]
 
-    if len(words) < 12:
-        text_weight = 0.45
-        max_probability = 0.35
+    if commodity_penalty >= 55 or originality_score < 25:
+        text_weight = 0.75
+        max_score = 48
+        max_probability = 0.22
+    elif commodity_penalty >= 35:
+        text_weight = 0.65
+        max_score = 58
+        max_probability = 0.32
     elif len(words) < 35:
-        text_weight = 0.35
-        max_probability = 0.55
+        text_weight = 0.55
+        max_score = 65
+        max_probability = 0.42
+    elif originality_score < 40:
+        text_weight = 0.55
+        max_score = 68
+        max_probability = 0.50
     else:
-        text_weight = 0.30
+        text_weight = 0.40
+        max_score = 100
         max_probability = 0.90
 
     blended_score = (1 - text_weight) * model_score + text_weight * text_score
     blended_probability = (1 - text_weight) * model_probability + text_weight * (text_score / 100)
 
-    # Cap de seguridad para descripciones pobres: aunque la categoría sea fuerte, no debe regalar probabilidad alta.
+    blended_score = min(blended_score, max_score)
     blended_probability = min(blended_probability, max_probability)
 
-    return round(float(blended_score), 1), round(float(clamp(blended_probability, 0, 1)), 3)
+    return round(float(clamp(blended_score, 0, 100)), 1), round(float(clamp(blended_probability, 0, 1)), 3)
 
+
+def strict_score_label(score):
+    """Etiqueta más estricta para que shortlist no empiece demasiado bajo."""
+    if score >= 92:
+        return "Potencial Gold / Grand Prix"
+    elif score >= 84:
+        return "Potencial metal"
+    elif score >= 76:
+        return "Potencial shortlist / bronze"
+    elif score >= 60:
+        return "Potencial medio, necesita fortalecer idea"
+    return "Potencial bajo"
 
 # ============================================================
 # PREDICCIÓN
@@ -1024,7 +1207,7 @@ def explain_campaign(inputs, predicted_score, prob_high_award):
 # INTERFAZ STREAMLIT
 # ============================================================
 
-st.title("🦁 Cannes Creative Potential Calculator")
+st.title("🦁 Cannes Creative Intelligence")
 
 st.caption(
     "Modelo exploratorio para estimar potencial Cannes a partir de descripción, variables creativas, "
@@ -1280,7 +1463,7 @@ input_row = {
 
 if st.button("Calcular potencial Cannes", type="primary"):
     base_score, base_prob_high_award = predict_campaign_potential(input_row)
-    text_quality_score, text_reasons = calculate_text_quality_score(
+    text_quality_score, text_reasons, commodity_penalty, originality_score = calculate_text_quality_score(
         project_name,
         project_description,
         category_norm
@@ -1290,10 +1473,12 @@ if st.button("Calcular potencial Cannes", type="primary"):
         base_score,
         base_prob_high_award,
         text_quality_score,
-        project_description
+        project_description,
+        commodity_penalty,
+        originality_score
     )
 
-    label = score_label(predicted_score)
+    label = strict_score_label(predicted_score)
     strengths, risks = explain_campaign(input_row, predicted_score, prob_high_award)
 
     st.divider()
@@ -1308,7 +1493,7 @@ if st.button("Calcular potencial Cannes", type="primary"):
     st.caption(
         f"Score base del modelo: {base_score}/100 · "
         f"Probabilidad base: {base_prob_high_award * 100:.1f}% · "
-        f"Score textual: {text_quality_score}/100"
+        f"Score textual: {text_quality_score}/100 · Originalidad Cannes: {originality_score}/100 · Penalización commodity: {commodity_penalty}/70"
     )
 
     st.markdown("### Lectura estratégica")
@@ -1343,6 +1528,8 @@ if st.button("Calcular potencial Cannes", type="primary"):
         "base_model_score": base_score,
         "base_prob_high_award": base_prob_high_award,
         "text_quality_score": text_quality_score,
+        "cannes_originality_score": originality_score,
+        "commodity_advertising_penalty": commodity_penalty,
         "predicted_cannes_score": predicted_score,
         "prob_high_award": prob_high_award,
         "prob_high_award_percent": round(prob_high_award * 100, 1),
@@ -1416,3 +1603,4 @@ st.caption(
     "Modelo exploratorio desarrollado para ISA. No debe interpretarse como garantía de premio; "
     "sirve como herramienta de priorización creativa."
 )
+
