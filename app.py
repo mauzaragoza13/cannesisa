@@ -851,15 +851,33 @@ def auto_estimate_all(project_name, description, category):
 # SCORE DIRECTO BASADO EN TEXTO + PENALTY ENGINE CANNES
 # ============================================================
 
-BAD_SIGNALS = [
+# Señales de publicidad commodity.
+# Importante: NO incluimos palabras como medios, pantallas, espectaculares, campaña,
+# publicidad o llamado a acción, porque en Cannes pueden ser parte de una activación válida.
+WEAK_COMMODITY_SIGNALS = [
+    "post en instagram", "instagram post", "posteo", "social media post",
+    "social media posts", "posts de redes", "banner", "display ads",
+    "anuncio display", "flyer", "volante", "email blast", "newsletter",
+    "landing page", "logo grande", "foto del producto", "product shot",
+    "comercial tradicional", "spot tradicional", "catálogo", "catalogo",
+    "performance", "ecommerce", "retail promotion"
+]
+
+HARD_COMMODITY_SIGNALS = [
     "discount", "descuento", "sale", "oferta", "promo", "promoción", "promocion",
-    "20%", "30%", "40%", "50%", "limited time", "tiempo limitado",
-    "buy now", "compra ahora", "call to action", "cta", "logo grande",
-    "product shot", "foto del producto", "post en instagram", "instagram post",
-    "social media posts", "posts de redes", "banner", "display ads", "anuncio display",
-    "flyer", "volante", "comercial tradicional", "spot tradicional", "catálogo", "catalogo",
-    "email blast", "newsletter", "landing page", "performance", "retail", "ecommerce",
-    "giveaway", "sorteo", "cupón", "cupon", "rebaja", "black friday", "hot sale"
+    "20%", "30%", "40%", "50%", "2x1", "limited time", "tiempo limitado",
+    "solo por hoy", "buy now", "compra ahora", "cupón", "cupon", "rebaja",
+    "black friday", "hot sale", "giveaway", "sorteo"
+]
+
+CANNES_PROTECTIVE_SIGNALS = [
+    "récord", "record", "guinness", "historia", "participantes", "personas reales",
+    "participación", "participacion", "co-creación", "co-creacion", "crowdsourced",
+    "metro", "aeropuerto", "aeropuertos", "ciudad", "ciudades", "espacio público",
+    "espacio publico", "copa del mundo", "mundial", "méxico", "mexico", "país", "pais",
+    "cultural", "tensión", "tension", "decepción", "decepcion", "orgullo",
+    "noticia", "prensa", "earned media", "conversación", "conversacion", "viral",
+    "en tiempo real", "contador", "activación", "activacion", "instalación", "instalacion"
 ]
 
 CANNES_POSITIVE_SIGNALS = {
@@ -867,30 +885,34 @@ CANNES_POSITIVE_SIGNALS = {
         "tensión cultural", "tension cultural", "cultural tension", "problema cultural",
         "tabú", "taboo", "prejuicio", "estigma", "debate", "conversación social",
         "conversacion social", "movimiento", "movement", "causa", "inequality", "desigualdad",
-        "discriminación", "discriminacion", "derechos", "rights", "climate", "clima"
+        "discriminación", "discriminacion", "derechos", "rights", "climate", "clima",
+        "decepción", "decepcion", "orgullo", "país", "pais", "méxico", "mexico"
     ],
     "earned_media": [
         "earned media", "prensa", "medios", "noticia", "news", "viral", "share",
         "compartir", "conversación", "conversacion", "buzz", "public conversation",
         "talk of", "trend", "trending", "récord", "record", "world's first", "first ever",
-        "primera vez", "nunca antes"
+        "primera vez", "nunca antes", "más grande", "mas grande", "historia"
     ],
     "participation": [
         "participa", "participación", "participacion", "invita a la gente", "usuarios",
         "comunidad", "community", "crowdsourced", "co-creación", "co-creacion",
         "interactive", "interactivo", "reto", "challenge", "activación", "activacion",
-        "instalación", "instalacion", "experiencia", "experience"
+        "instalación", "instalacion", "experiencia", "experience", "graba", "publica",
+        "personas reales", "cualquier persona"
     ],
     "craft_or_execution": [
         "film", "documental", "documentary", "instalación", "instalacion", "prototype",
         "prototipo", "plataforma", "app", "ai", "inteligencia artificial", "data",
         "sensor", "realidad aumentada", "augmented reality", "diseño", "design",
-        "packaging", "producto", "product innovation"
+        "packaging", "producto", "product innovation", "pantallas", "contador",
+        "en tiempo real", "compilamos", "editamos", "aeropuertos", "metro"
     ],
     "human_truth": [
         "historia real", "real story", "testimonio", "testimony", "familia", "family",
         "memoria", "memory", "identidad", "identity", "orgullo", "pride", "sueño", "dream",
-        "vida", "life", "personas", "people", "human", "humano"
+        "vida", "life", "personas", "people", "human", "humano", "decepción", "decepcion",
+        "selección", "seleccion", "mexicanos"
     ]
 }
 
@@ -911,15 +933,24 @@ def keyword_hits(text, words):
     return hits
 
 
-def calculate_commodity_penalty(project_name, description):
+def get_dimension_raw_hits(project_name, description):
+    text = f"{project_name} {description}".lower()
+    return {dimension: keyword_hits(text, terms) for dimension, terms in CANNES_POSITIVE_SIGNALS.items()}
+
+
+def calculate_commodity_penalty(project_name, description, originality_score=None, dimension_scores=None):
     """
-    Detecta ideas que suenan a publicidad tradicional, performance o promoción retail.
-    Esta capa evita que una idea mala llegue a shortlist solo por categoría.
+    Penaliza publicidad commodity sin castigar activaciones con medios.
+    Una pantalla, un espectacular o un CTA no son commodity por sí mismos;
+    commodity es que la idea dependa de descuento, post, banner, logo o promoción retail.
     """
     text = f"{project_name} {description}".lower()
     words = [w for w in re.findall(r"\b\w+\b", text) if len(w) > 2]
-    bad_hits = keyword_hits(text, BAD_SIGNALS)
+
+    weak_hits = keyword_hits(text, WEAK_COMMODITY_SIGNALS)
+    hard_hits = keyword_hits(text, HARD_COMMODITY_SIGNALS)
     generic_hits = keyword_hits(text, WEAK_OR_GENERIC_SIGNALS)
+    protective_hits = keyword_hits(text, CANNES_PROTECTIVE_SIGNALS)
 
     penalty = 0
     reasons = []
@@ -931,29 +962,54 @@ def calculate_commodity_penalty(project_name, description):
         penalty += 12
         reasons.append("La descripción es breve; falta tensión, mecánica, ejecución e impacto.")
 
-    if len(bad_hits) >= 5:
-        penalty += 35
-        reasons.append("Suena a promoción/publicidad commodity: " + ", ".join(bad_hits[:6]) + ".")
-    elif len(bad_hits) >= 3:
-        penalty += 25
-        reasons.append("Tiene varias señales de publicidad tradicional o promocional: " + ", ".join(bad_hits[:5]) + ".")
-    elif len(bad_hits) >= 1:
-        penalty += 10
-        reasons.append("Tiene señales promocionales que normalmente no son Cannes por sí solas: " + ", ".join(bad_hits[:3]) + ".")
+    raw_commodity = len(weak_hits) * 4 + len(hard_hits) * 10
+
+    promo_core = any(x in text for x in [
+        "descuento", "discount", "promo", "promoción", "promocion", "oferta",
+        "sale", "2x1", "rebaja", "cupón", "cupon"
+    ])
+    ad_format = any(x in text for x in [
+        "post en instagram", "instagram post", "banner", "flyer", "anuncio display",
+        "logo grande", "foto del producto", "product shot", "compra ahora", "buy now"
+    ])
+
+    if promo_core and ad_format:
+        raw_commodity += 25
+        reasons.append("La mecánica parece depender de promoción + formato publicitario básico.")
 
     if len(generic_hits) >= 3 and len(words) < 70:
-        penalty += 12
+        raw_commodity += 8
         reasons.append("Usa lenguaje genérico sin explicar suficientemente la mecánica creativa.")
 
-    # Penalización especial: ideas de post/anuncio + descuento/compra.
-    promo_core = any(x in text for x in ["descuento", "discount", "promo", "promoción", "promocion", "oferta", "sale"])
-    ad_format = any(x in text for x in ["post", "instagram", "banner", "flyer", "anuncio", "logo", "compra ahora", "buy now"])
-    if promo_core and ad_format:
-        penalty += 25
-        reasons.append("La mecánica central parece ser descuento + pieza publicitaria; eso debe quedar en rango bajo salvo que exista una idea cultural fuerte.")
+    cannes_protection = 0
+    if originality_score is not None and originality_score >= 65:
+        cannes_protection += 1
+    if dimension_scores:
+        if dimension_scores.get("earned_media", 0) >= 12:
+            cannes_protection += 1
+        if dimension_scores.get("participation", 0) >= 12:
+            cannes_protection += 1
+        if dimension_scores.get("cultural_tension", 0) >= 7:
+            cannes_protection += 1
+    if len(protective_hits) >= 3:
+        cannes_protection += 1
 
-    return clamp(penalty, 0, 70), reasons, bad_hits
+    # Si hay señales Cannes fuertes, reducimos el castigo por palabras publicitarias sueltas.
+    if cannes_protection >= 3:
+        raw_commodity *= 0.25
+    elif cannes_protection == 2:
+        raw_commodity *= 0.50
 
+    penalty += raw_commodity
+
+    if weak_hits or hard_hits:
+        detected = hard_hits + weak_hits
+        reasons.append("Señales commodity detectadas: " + ", ".join(detected[:6]) + ".")
+
+    if cannes_protection >= 3 and (weak_hits or hard_hits):
+        reasons.append("La penalización commodity fue reducida porque el texto sí contiene participación, earned media o tensión cultural.")
+
+    return round(clamp(penalty, 0, 70), 1), reasons, hard_hits + weak_hits
 
 def calculate_cannes_originality_score(project_name, description):
     """
@@ -1026,8 +1082,13 @@ def calculate_text_quality_score(project_name, description, category):
         return 12.0, ["Descripción demasiado corta: no hay suficiente idea para evaluar."], 70, 0.0
 
     auto = auto_estimate_all(project_name, description, category)
-    originality_score, originality_reasons, _ = calculate_cannes_originality_score(project_name, description)
-    commodity_penalty, penalty_reasons, bad_hits = calculate_commodity_penalty(project_name, description)
+    originality_score, originality_reasons, dimension_scores = calculate_cannes_originality_score(project_name, description)
+    commodity_penalty, penalty_reasons, bad_hits = calculate_commodity_penalty(
+        project_name,
+        description,
+        originality_score=originality_score,
+        dimension_scores=dimension_scores
+    )
 
     # Base textual más conservadora que antes.
     score = 0
@@ -1201,6 +1262,164 @@ def explain_campaign(inputs, predicted_score, prob_high_award):
         risks.append("Probabilidad estimada de premio alto limitada")
 
     return strengths, risks
+
+
+# ============================================================
+# RECOMENDACIONES ESTRATÉGICAS BASADAS EN TEXTO
+# ============================================================
+
+def generate_cannes_recommendations(project_name, description, category, input_row, predicted_score, prob_high_award, originality_score, commodity_penalty):
+    """
+    Genera recomendaciones accionables para mejorar la idea con lógica de Cannes.
+    No usa IA generativa externa; usa reglas interpretables basadas en texto, categoría y scores.
+    """
+    text = f"{project_name} {description}".lower()
+    category_l = str(category).lower()
+    dim_hits = get_dimension_raw_hits(project_name, description)
+
+    recommendations = []
+    strengths = []
+
+    # Fortalezas detectadas
+    if len(dim_hits.get("cultural_tension", [])) > 0:
+        strengths.append("Tiene una tensión cultural o contexto país que puede sostener una narrativa Cannes.")
+    if len(dim_hits.get("earned_media", [])) > 0:
+        strengths.append("Tiene potencial de conversación pública / earned media.")
+    if len(dim_hits.get("participation", [])) > 0:
+        strengths.append("La mecánica invita a participación, no solo a exposición publicitaria.")
+    if len(dim_hits.get("craft_or_execution", [])) > 0:
+        strengths.append("Hay una base de ejecución visible: medios, plataforma, instalación, data o experiencia.")
+    if len(dim_hits.get("human_truth", [])) > 0:
+        strengths.append("Tiene una verdad humana/emocional que puede convertir la idea en historia.")
+
+    # Recomendaciones universales
+    if not any(w in text for w in ["guinness", "récord oficial", "record oficial", "validación", "validacion", "certificación", "certificacion"]):
+        recommendations.append({
+            "title": "Convertir la idea en un hecho verificable",
+            "why": "La idea habla de lograr algo histórico, pero necesita una prueba clara para que prensa, jurado y público lo crean.",
+            "how": [
+                "Definir si será récord oficial, récord de marca o récord cultural documentado.",
+                "Agregar validación externa: Guinness World Records, notario, plataforma pública de conteo o alianza con medios.",
+                "Mostrar contador en tiempo real, número de participantes, ciudades y kilómetros simbólicos recorridos."
+            ]
+        })
+
+    if not any(w in text for w in ["marca", "brand", "patrocinador", "sponsor", "habilita", "presenta", "powered by"]):
+        recommendations.append({
+            "title": "Hacer inevitable el rol de la marca",
+            "why": "Una idea Cannes fuerte no solo es buena culturalmente; la marca debe tener derecho a firmarla.",
+            "how": [
+                "Explicar por qué esta marca puede unir a la gente mejor que nadie.",
+                "Dar a la marca un rol funcional: plataforma, tecnología, infraestructura, acceso, data o convocatoria.",
+                "Evitar que parezca una idea que cualquier institución podría firmar igual."
+            ]
+        })
+
+    if input_row.get("viral_potential", 0) < 8 or len(dim_hits.get("earned_media", [])) < 2:
+        recommendations.append({
+            "title": "Diseñar el momento noticioso",
+            "why": "La idea puede ser participativa, pero Cannes premia cuando la campaña se vuelve noticia por una razón concreta.",
+            "how": [
+                "Definir el día exacto del rompimiento o lanzamiento como evento nacional.",
+                "Crear un titular fácil: ‘México hace la ola más grande del mundo aunque no llegue a la final’." ,
+                "Preparar assets para prensa: visualizador en vivo, mapa, ranking por ciudad y video hero de 60 segundos."
+            ]
+        })
+
+    if input_row.get("execution_complexity", 0) >= 8:
+        recommendations.append({
+            "title": "Bajar el riesgo de ejecución",
+            "why": "La idea es grande; si la mecánica no está clara, el jurado puede verla como aspiracional pero difícil de probar.",
+            "how": [
+                "Separar la ejecución en fases: teaser, convocatoria, acumulación, rompimiento y film final.",
+                "Definir reglas simples para participar: duración, formato, hashtag, geolocalización y moderación.",
+                "Agregar un prototipo visual de cómo se une cada video en una sola ola continua."
+            ]
+        })
+
+    if originality_score < 75:
+        recommendations.append({
+            "title": "Agregar un twist propio que nadie más pueda copiar",
+            "why": "La base es buena, pero necesita un giro diferencial para sentirse más Cannes y menos activación masiva estándar.",
+            "how": [
+                "Que la ola reaccione en tiempo real a participación por ciudad, país o selección eliminada.",
+                "Convertir la decepción deportiva en una acción emocional: ‘el equipo no llegó, México sí’." ,
+                "Hacer que cada pantalla pública sea un fragmento vivo de la ola, no solo un medio que la comunica."
+            ]
+        })
+
+    if commodity_penalty > 8:
+        recommendations.append({
+            "title": "Reducir cualquier lectura de publicidad tradicional",
+            "why": "El sistema detectó algunas señales commodity. No necesariamente dañan la idea, pero hay que evitar que parezca solo pauta o convocatoria.",
+            "how": [
+                "Cambiar lenguaje de ‘soportes publicitarios’ por ‘infraestructura viva de participación’." ,
+                "Mostrar cómo el medio se transforma con la ola, no solo cómo muestra anuncios.",
+                "Evitar que el call to action sea el centro; el centro debe ser el acontecimiento cultural."
+            ]
+        })
+
+    # Recomendaciones por categoría
+    if "public relations" in category_l or category_l.strip() == "pr":
+        recommendations.append({
+            "title": "Para PR: construir la estrategia de earned media",
+            "why": "En PR no basta una activación; debe existir una noticia que viaje sola.",
+            "how": [
+                "Definir 3 titulares de prensa antes de producir la campaña.",
+                "Incluir voceros, datos en vivo y alianzas con medios deportivos/culturales.",
+                "Preparar una escalera de conversación: México, fans, diáspora, Mundial, récord."
+            ]
+        })
+    elif "outdoor" in category_l:
+        recommendations.append({
+            "title": "Para Outdoor: hacer que el medio sea la idea",
+            "why": "En Outdoor, el soporte debe transformar el espacio físico, no solo alojar contenido.",
+            "how": [
+                "Sincronizar pantallas para que la ola avance físicamente de izquierda a derecha.",
+                "Usar estaciones, túneles, aeropuertos o puentes como tramos reales de la ola.",
+                "Medir participación por ubicación y reflejarla en los medios en vivo."
+            ]
+        })
+    elif "titanium" in category_l:
+        recommendations.append({
+            "title": "Para Titanium: elevarlo de campaña a movimiento cultural",
+            "why": "Titanium premia ideas que cambian el comportamiento o la conversación de una categoría.",
+            "how": [
+                "Convertir la ola en un símbolo nacional que trascienda a un partido.",
+                "Crear participación internacional de mexicanos en el extranjero.",
+                "Demostrar impacto cultural: participación, prensa, conversación, uso orgánico y permanencia."
+            ]
+        })
+    elif "innovation" in category_l:
+        recommendations.append({
+            "title": "Para Innovation: fortalecer la tecnología detrás de la idea",
+            "why": "Innovation necesita defensibilidad técnica, no solo una ejecución digital bonita.",
+            "how": [
+                "Explicar el motor que une videos: moderación, stitching, geolocalización y render en tiempo real.",
+                "Crear una demo del sistema antes del caso final.",
+                "Mostrar qué parte de la tecnología es nueva o difícil de replicar."
+            ]
+        })
+    elif "film" in category_l:
+        recommendations.append({
+            "title": "Para Film: diseñar el arco emocional",
+            "why": "Film necesita una historia que se sienta inevitable, no solo una compilación de participación.",
+            "how": [
+                "Abrir con la tensión: México quizá no llega a la final, pero la gente sí.",
+                "Seguir con rostros reales: familias, oficinas, metro, aeropuertos, azoteas.",
+                "Cerrar con la ola unificada y una frase memorable."
+            ]
+        })
+
+    # Limitar duplicados por título
+    seen = set()
+    unique_recommendations = []
+    for rec in recommendations:
+        if rec["title"] not in seen:
+            unique_recommendations.append(rec)
+            seen.add(rec["title"])
+
+    return strengths, unique_recommendations[:7]
 
 
 # ============================================================
@@ -1518,6 +1737,39 @@ if st.button("Calcular potencial Cannes", type="primary"):
         for item in risks:
             st.write(f"⚠️ {item}")
 
+    detected_strengths, recommendations = generate_cannes_recommendations(
+        project_name,
+        project_description,
+        category_norm,
+        input_row,
+        predicted_score,
+        prob_high_award,
+        originality_score,
+        commodity_penalty
+    )
+
+    st.markdown("### Recomendaciones para mejorar la idea")
+
+    if detected_strengths:
+        st.markdown("**Lo que ya está funcionando**")
+        for item in detected_strengths:
+            st.write(f"✅ {item}")
+
+    if recommendations:
+        st.markdown("**Qué reforzar para subir potencial Cannes**")
+        for i, rec in enumerate(recommendations, start=1):
+            with st.expander(f"{i}. {rec['title']}", expanded=i <= 3):
+                st.write(f"**Por qué importa:** {rec['why']}")
+                st.write("**Cómo mejorarlo:**")
+                for action in rec["how"]:
+                    st.write(f"• {action}")
+    else:
+        st.info("No se detectaron recomendaciones específicas. Agrega más detalle sobre mecánica, ejecución, rol de marca e impacto esperado.")
+
+    recommendation_text = " | ".join([
+        rec["title"] + ": " + "; ".join(rec["how"]) for rec in recommendations
+    ])
+
     result_df = pd.DataFrame([{
         "project_name": project_name,
         "project_description": project_description,
@@ -1535,7 +1787,9 @@ if st.button("Calcular potencial Cannes", type="primary"):
         "prob_high_award_percent": round(prob_high_award * 100, 1),
         "potential_label": label,
         "strengths": "; ".join(strengths),
-        "risks": "; ".join(risks)
+        "risks": "; ".join(risks),
+        "detected_text_strengths": "; ".join(detected_strengths),
+        "recommendations": recommendation_text
     }])
 
     st.download_button(
@@ -1603,4 +1857,3 @@ st.caption(
     "Modelo exploratorio desarrollado para ISA. No debe interpretarse como garantía de premio; "
     "sirve como herramienta de priorización creativa."
 )
-
