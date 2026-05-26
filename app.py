@@ -845,6 +845,114 @@ def auto_estimate_all(project_name, description, category):
     }
 
 
+
+
+# ============================================================
+# SCORE DIRECTO BASADO EN TEXTO
+# ============================================================
+
+def calculate_text_quality_score(project_name, description, category):
+    """
+    Score directo del texto para que la descripción también afecte la calificación final.
+    No reemplaza al Random Forest: funciona como una capa de calibración sobre la predicción.
+    """
+    text = f"{project_name} {description}".lower().strip()
+    words = [w for w in re.findall(r"\b\w+\b", text) if len(w) > 2]
+
+    if len(words) < 12:
+        return 20.0, ["Descripción demasiado corta para evaluar la idea con confianza."]
+
+    auto = auto_estimate_all(project_name, description, category)
+
+    score = 0
+    reasons = []
+
+    # 1) Profundidad de información creativa
+    if len(words) >= 80:
+        score += 18
+        reasons.append("Descripción suficientemente detallada.")
+    elif len(words) >= 45:
+        score += 14
+        reasons.append("Descripción con detalle medio.")
+    elif len(words) >= 25:
+        score += 9
+        reasons.append("Descripción entendible, pero todavía breve.")
+    else:
+        score += 4
+        reasons.append("Descripción breve; falta más contexto creativo.")
+
+    # 2) Variables inferidas desde el texto
+    score += auto["cultural_relevance"] * 2.0
+    score += auto["viral_potential"] * 2.2
+    score += auto["simplicity_of_insight"] * 1.6
+
+    # La complejidad alta puede ser positiva, pero si es excesiva castiga
+    if auto["execution_complexity"] <= 7:
+        score += auto["execution_complexity"] * 1.1
+    else:
+        score += 7.0
+        reasons.append("La idea parece compleja; revisar factibilidad de ejecución.")
+
+    # 3) Señales Cannes: impacto, tecnología, earned media, cultura
+    if auto["social_impact_ai"] == 1:
+        score += 7
+        reasons.append("Detecta componente de impacto social.")
+
+    if auto["tech_component_ai"] == 1:
+        score += 5
+        reasons.append("Detecta componente tecnológico.")
+
+    if auto["jury_fit_score"] >= 75:
+        score += 10
+        reasons.append("Buena afinidad texto-categoría/jurado.")
+    elif auto["jury_fit_score"] >= 55:
+        score += 6
+        reasons.append("Afinidad media con la categoría.")
+    else:
+        score += 2
+        reasons.append("Afinidad baja con la categoría seleccionada.")
+
+    # 4) Penalización si el texto es genérico
+    generic_words = [
+        "innovador", "disruptivo", "impactante", "creativo", "único", "unico",
+        "emocionante", "diferente", "experiencia increíble", "gran campaña"
+    ]
+    generic_count = count_keywords(text, generic_words)
+
+    if generic_count >= 3 and len(words) < 50:
+        score -= 12
+        reasons.append("El texto usa términos genéricos sin explicar la mecánica de la idea.")
+
+    final_score = round(clamp(score, 0, 100), 1)
+    return final_score, reasons
+
+
+def blend_model_with_text_score(model_score, model_probability, text_score, description):
+    """
+    Mezcla la predicción del modelo entrenado con un score textual.
+    Evita que una categoría por sí sola infle demasiado la probabilidad.
+    """
+    words = [w for w in str(description).split() if len(w) > 2]
+
+    if len(words) < 12:
+        text_weight = 0.45
+        max_probability = 0.35
+    elif len(words) < 35:
+        text_weight = 0.35
+        max_probability = 0.55
+    else:
+        text_weight = 0.30
+        max_probability = 0.90
+
+    blended_score = (1 - text_weight) * model_score + text_weight * text_score
+    blended_probability = (1 - text_weight) * model_probability + text_weight * (text_score / 100)
+
+    # Cap de seguridad para descripciones pobres: aunque la categoría sea fuerte, no debe regalar probabilidad alta.
+    blended_probability = min(blended_probability, max_probability)
+
+    return round(float(blended_score), 1), round(float(clamp(blended_probability, 0, 1)), 3)
+
+
 # ============================================================
 # PREDICCIÓN
 # ============================================================
@@ -1171,7 +1279,20 @@ input_row = {
 }
 
 if st.button("Calcular potencial Cannes", type="primary"):
-    predicted_score, prob_high_award = predict_campaign_potential(input_row)
+    base_score, base_prob_high_award = predict_campaign_potential(input_row)
+    text_quality_score, text_reasons = calculate_text_quality_score(
+        project_name,
+        project_description,
+        category_norm
+    )
+
+    predicted_score, prob_high_award = blend_model_with_text_score(
+        base_score,
+        base_prob_high_award,
+        text_quality_score,
+        project_description
+    )
+
     label = score_label(predicted_score)
     strengths, risks = explain_campaign(input_row, predicted_score, prob_high_award)
 
@@ -1184,7 +1305,18 @@ if st.button("Calcular potencial Cannes", type="primary"):
     metric2.metric("Probabilidad High Award", f"{prob_high_award * 100:.1f}%")
     metric3.metric("Etiqueta", label)
 
+    st.caption(
+        f"Score base del modelo: {base_score}/100 · "
+        f"Probabilidad base: {base_prob_high_award * 100:.1f}% · "
+        f"Score textual: {text_quality_score}/100"
+    )
+
     st.markdown("### Lectura estratégica")
+
+    if text_reasons:
+        st.markdown("**Lectura del texto**")
+        for reason in text_reasons:
+            st.write(f"• {reason}")
 
     if jury_profile is not None:
         st.markdown("**Contexto de jurado / categoría**")
@@ -1208,6 +1340,9 @@ if st.button("Calcular potencial Cannes", type="primary"):
         "jury_role": jury_profile.get("jury_role", "") if jury_profile else "",
         "jury_affinity_summary": jury_profile.get("affinity_summary", "") if jury_profile else "",
         **input_row,
+        "base_model_score": base_score,
+        "base_prob_high_award": base_prob_high_award,
+        "text_quality_score": text_quality_score,
         "predicted_cannes_score": predicted_score,
         "prob_high_award": prob_high_award,
         "prob_high_award_percent": round(prob_high_award * 100, 1),
